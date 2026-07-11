@@ -1,0 +1,75 @@
+Entername: Video Encoder Workflow
+
+# 🔥 EK BAAR ME EK TASK (Auto-Queue System)
+concurrency:
+  group: processing
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_type:
+        required: true
+      video_id:
+        required: true
+      sub_id:
+        required: true
+      chat_id:
+        required: true
+      user_id:
+        required: true
+      resolution:
+        required: true
+      wm_id:
+        required: true
+      wm_pos:
+        required: true
+      rename:
+        required: true
+      font_link:
+        required: true
+      trigger_msg_id:
+        required: true
+
+jobs:
+  encode_job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install System Deps
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fontconfig
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip' # 🔥 FAST STARTUP: Tools ek baar download honge, baar-baar nahi!
+          
+      - name: Install Python Deps
+        # tgcrypto install ho raha hai jisse Pyrogram ki Downloading/Uploading speed 10x fast ho jayegi!
+        run: pip install pyrogram tgcrypto pysubs2 requests fonttools
+        
+      - name: Run Dedicated Video Worker
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TASK_TYPE: ${{ github.event.inputs.task_type }}
+          VIDEO_ID: ${{ github.event.inputs.video_id }}
+          SUB_ID: ${{ github.event.inputs.sub_id }}
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          USER_ID: ${{ github.event.inputs.user_id }}
+          RESOLUTION: ${{ github.event.inputs.resolution }}
+          WM_ID: ${{ github.event.inputs.wm_id }}
+          WM_POS: ${{ github.event.inputs.wm_pos }}
+          RENAME: ${{ github.event.inputs.rename }}
+          FONT_LINK: ${{ github.event.inputs.font_link }}
+          TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
+        run: python encorder.py # ✅ File ka name yahan fix kar diya hai
+        
+      - name: Cleanup
+        if: always()
+        run: rm -rf *
