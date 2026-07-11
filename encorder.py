@@ -65,7 +65,7 @@ async def prog(c, t, app_instance, step_name):
         last_time = now
         return
         
-    if now - last_time > 10 or c == t:
+    if now - last_time > 1 or c == t:
         elapsed = now - start_time
         speed = c / elapsed if elapsed > 0 else 0
         speed_mb = (speed / 1024) / 1024
@@ -240,12 +240,11 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # 🔥 SPEED OPTIMIZATION FOR COMPRESS
+            # 🔥 CRASH FIX: Removed invalid Subtitle Mapping for MP4 Format
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
-                "-sws_flags", "fast_bilinear", # Scale fast
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "34", "-threads", "0", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", 
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
             ]
             
@@ -262,7 +261,7 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 10:
+                        if now - last_edit > 1:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
@@ -280,11 +279,10 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
-            # 🔥 SPEED OPTIMIZATION FOR HARDSUB
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-sws_flags", "fast_bilinear", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-sws_flags", "fast_bilinear", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_file]
@@ -299,7 +297,7 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 10:
+                        if now - last_edit > 1:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
