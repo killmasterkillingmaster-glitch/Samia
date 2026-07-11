@@ -1,4 +1,4 @@
-Enterimport os, sys, time, asyncio, re, subprocess, requests, html
+import os, sys, time, asyncio, re, subprocess, requests, html
 import pyrogram.utils, pysubs2
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
