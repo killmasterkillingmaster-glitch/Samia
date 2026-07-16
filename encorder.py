@@ -1,4 +1,4 @@
-import os, sys, time, asyncio, re, subprocess, requests, html
+import os, sys, time, asyncio, re, subprocess, requests, html, shutil
 import pyrogram.utils, pysubs2
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -65,7 +65,7 @@ async def prog(c, t, app_instance, step_name):
         last_time = now
         return
         
-    # Throttled to 10 seconds to avoid Telegram API flood
+    # Throttled to 10 seconds to avoid flooding API and causing delays
     if now - last_time > 10 or c == t:
         elapsed = now - start_time
         speed = c / elapsed if elapsed > 0 else 0
@@ -164,7 +164,8 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
 async def main():
     global status_msg_id
     
-    app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+    # Speed optimized: Set client workers to 16 for faster pipeline handling
+    app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
     await app.start()
 
     if TRIGGER_MSG_ID and TRIGGER_MSG_ID != "none":
@@ -226,21 +227,25 @@ async def main():
         process_title = "Compress/extract" if TASK_TYPE == "compress" else "Encoding/resize"
 
         if TASK_TYPE == "compress":
-            try:
-                for temp_sub in ["raw_sub.ass", "raw_sub.srt"]:
-                    if os.path.exists(temp_sub): os.remove(temp_sub)
-                
-                # Robust extraction: Trying srt then fallback to ass using auto stream map
-                subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s?", "raw_sub.srt"], capture_output=True, timeout=30)
-                if os.path.exists("raw_sub.srt") and os.path.getsize("raw_sub.srt") > 0:
-                    extract_clean_dialogues("raw_sub.srt", sub_extracted)
-                else:
-                    subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s?", "raw_sub.ass"], capture_output=True, timeout=30)
-                    if os.path.exists("raw_sub.ass") and os.path.getsize("raw_sub.ass") > 0:
-                        extract_clean_dialogues("raw_sub.ass", sub_extracted)
-                    else:
-                        sub_extracted = None
-            except:
+            # Strict subtitle extraction logic directly to ASS
+            raw_sub = "raw_sub.ass"
+            if os.path.exists(raw_sub): os.remove(raw_sub)
+            
+            print("DEBUG: Initiating subtitle extraction...")
+            # Try to map first subtitle track strictly to raw_sub.ass
+            res_ex = subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s:0", raw_sub], capture_output=True, text=True, timeout=45)
+            print("FFMPEG OUT:", res_ex.stdout)
+            print("FFMPEG ERR:", res_ex.stderr)
+            
+            if os.path.exists(raw_sub) and os.path.getsize(raw_sub) > 0:
+                print("DEBUG: Raw subtitle file generated. Cleaning up dialogues...")
+                try:
+                    extract_clean_dialogues(raw_sub, sub_extracted)
+                except Exception as sub_clean_err:
+                    print(f"DEBUG: Cleanup failed ({sub_clean_err}). Falling back to copying raw ASS file.")
+                    shutil.copy(raw_sub, sub_extracted)
+            else:
+                print("DEBUG: Subtitle track not found or extraction failed.")
                 sub_extracted = None
 
             reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
@@ -249,7 +254,6 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # Pix_fmt forced to yuv420p for standard mp4 compatibility and crash mitigation
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
@@ -270,7 +274,6 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        # Throttled to 10 seconds to avoid flooding
                         if now - last_edit > 10:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
@@ -307,7 +310,6 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        # Throttled to 10 seconds to avoid flooding
                         if now - last_edit > 10:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
@@ -319,18 +321,35 @@ async def main():
             if process.returncode != 0: raise Exception("FFmpeg hardsub encoding failed.")
 
         # ---------------- PHASE 3: UPLOAD ----------------
-        app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+        app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
         await app_up.start()
         await update_http_status(f"📤 Sending Video\n{get_send_bar(0)} [0.0%]")
         
         await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Successful\n`{out_name}`", prog)
         
-        if TASK_TYPE == "compress" and 'sub_extracted' in locals() and sub_extracted and os.path.exists(sub_extracted):
+        # Subtitle file delivery logic in strict .ass format
+        if TASK_TYPE == "compress" and sub_extracted and os.path.exists(sub_extracted):
+            print("DEBUG: Preparing extracted subtitle dispatch...")
+            sub_uploaded = False
             try:
-                sub_desk = await asyncio.wait_for(app_up.send_document(DESK_CHANNEL_ID, document=sub_extracted, caption="📄 Log: Extracted Dialogues ASS"), timeout=600)
-                try: await app_up.send_document(USER_ID, document=sub_desk.document.file_id, caption="📄 Extracted Dialogues ASS File")
+                sub_desk = await asyncio.wait_for(
+                    app_up.send_document(DESK_CHANNEL_ID, document=sub_extracted, caption="📄 Log: Extracted Dialogues ASS"), timeout=300
+                )
+                file_id = sub_desk.document.file_id
+                try: 
+                    await app_up.send_document(USER_ID, document=file_id, caption="📄 Extracted Dialogues ASS File")
+                    sub_uploaded = True
                 except: pass
-            except: pass
+            except Exception as e_desk:
+                print(f"DEBUG: Log desk delivery missed: {e_desk}")
+            
+            # Direct backup channel if private sending failed
+            if not sub_uploaded:
+                try:
+                    await app_up.send_document(CHAT_ID, document=sub_extracted, caption="📄 Extracted Dialogues ASS File")
+                    print("DEBUG: Direct group dispatch successful.")
+                except Exception as e_backup:
+                    print(f"DEBUG: Direct group dispatch missed: {e_backup}")
 
         try: await app_up.delete_messages(CHAT_ID, status_msg_id)
         except: pass
