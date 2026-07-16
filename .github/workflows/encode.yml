@@ -1,6 +1,6 @@
 name: Video Encoder Workflow
 
-# 🔥 EK BAAR ME EK TASK (Auto-Queue System)
+# Auto-Queue System (Single Task Execution)
 concurrency:
   group: processing
   cancel-in-progress: false
@@ -39,17 +39,37 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install System Deps
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fontconfig
+      - name: Setup Bin Directory
+        run: mkdir -p ${{ github.workspace }}/bin
+
+      # Static FFmpeg binary cache setup to prevent redownloads across workflow triggers
+      - name: Cache FFmpeg Binaries
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/bin
+          key: ${{ runner.os }}-ffmpeg-static-v2
+
+      - name: Install FFmpeg Static (On Cache Miss)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          cd ${{ github.workspace }}/bin
+          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg-release-amd64-static.tar.xz --strip-components=1
+          rm -f ffmpeg-release-amd64-static.tar.xz
+
+      - name: Configure System Path & Fontconfig
+        run: |
+          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
+          sudo apt-get update && sudo apt-get install -y fontconfig
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: 'pip' # 🔥 FAST STARTUP: Tools ek baar download honge, baar-baar nahi!
-          
-      - name: Install Python Deps
-        # tgcrypto install ho raha hai jisse Pyrogram ki Downloading/Uploading speed 10x fast ho jayegi!
+          cache: 'pip' # Automated caching of Python package downloads
+
+      - name: Install Python Dependencies
         run: pip install pyrogram tgcrypto pysubs2 requests fonttools
         
       - name: Run Dedicated Video Worker
@@ -68,8 +88,10 @@ jobs:
           RENAME: ${{ github.event.inputs.rename }}
           FONT_LINK: ${{ github.event.inputs.font_link }}
           TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
-        run: python encorder.py # ✅ File ka name yahan fix kar diya hai
+        run: python encorder.py
         
-      - name: Cleanup
+      - name: Cleanup Temporary Assets
         if: always()
-        run: rm -rf *
+        run: |
+          # Deletes media assets safely without breaking the cached 'bin' directory
+          rm -f video.mkv watermark.png ready_sub.ass custom_font.ttf raw_sub.ass raw_sub.srt output.mp4 *.mp4 *.ass *.srt
