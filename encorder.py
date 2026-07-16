@@ -65,7 +65,8 @@ async def prog(c, t, app_instance, step_name):
         last_time = now
         return
         
-    if now - last_time > 1 or c == t:
+    # Throttled to 10 seconds to avoid Telegram API flood
+    if now - last_time > 10 or c == t:
         elapsed = now - start_time
         speed = c / elapsed if elapsed > 0 else 0
         speed_mb = (speed / 1024) / 1024
@@ -163,7 +164,6 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
 async def main():
     global status_msg_id
     
-    # 🔥 FASTEST DEFAULT CLIENT ENGINE
     app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     await app.start()
 
@@ -181,7 +181,6 @@ async def main():
 
         orig_width, orig_height, duration = get_video_dimensions_and_duration(video_file)
 
-        # 🔥 ORIGINAL FILE NAME FIX
         base_name = "output"
         if RENAME and RENAME != "none":
             base_name = RENAME.rsplit('.', 1)[0]
@@ -228,11 +227,21 @@ async def main():
 
         if TASK_TYPE == "compress":
             try:
-                subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s:0", "raw_sub.ass"], capture_output=True)
-                if os.path.exists("raw_sub.ass") and os.path.getsize("raw_sub.ass") > 0: 
-                    extract_clean_dialogues("raw_sub.ass", sub_extracted)
-                else: sub_extracted = None
-            except: sub_extracted = None
+                for temp_sub in ["raw_sub.ass", "raw_sub.srt"]:
+                    if os.path.exists(temp_sub): os.remove(temp_sub)
+                
+                # Robust extraction: Trying srt then fallback to ass using auto stream map
+                subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s?", "raw_sub.srt"], capture_output=True, timeout=30)
+                if os.path.exists("raw_sub.srt") and os.path.getsize("raw_sub.srt") > 0:
+                    extract_clean_dialogues("raw_sub.srt", sub_extracted)
+                else:
+                    subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s?", "raw_sub.ass"], capture_output=True, timeout=30)
+                    if os.path.exists("raw_sub.ass") and os.path.getsize("raw_sub.ass") > 0:
+                        extract_clean_dialogues("raw_sub.ass", sub_extracted)
+                    else:
+                        sub_extracted = None
+            except:
+                sub_extracted = None
 
             reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
             if reso_clean and reso_clean.lower() != "none": scale_filter = f"scale=-2:{reso_clean}"
@@ -240,11 +249,11 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # 🔥 CRASH FIX: Removed invalid Subtitle Mapping for MP4 Format
+            # Pix_fmt forced to yuv420p for standard mp4 compatibility and crash mitigation
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
             ]
             
@@ -261,7 +270,8 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 1:
+                        # Throttled to 10 seconds to avoid flooding
+                        if now - last_edit > 10:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
@@ -280,9 +290,9 @@ async def main():
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_file]
@@ -297,7 +307,8 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 1:
+                        # Throttled to 10 seconds to avoid flooding
+                        if now - last_edit > 10:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
