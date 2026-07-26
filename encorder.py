@@ -65,17 +65,16 @@ async def prog(c, t, app_instance, step_name):
         last_time = now
         return
         
-    # Throttled to 10 seconds to avoid flooding API and causing delays
-    if now - last_time > 10 or c == t:
+    if now - last_time > 8 or c == t:
         elapsed = now - start_time
         speed = c / elapsed if elapsed > 0 else 0
         speed_mb = (speed / 1024) / 1024
         percent = (c / t) * 100 if t > 0 else 0
         
         if step_name in ["hardsub_download", "compress_download"]:
-            text = f"📥 Downloading video\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📥 Downloading Video\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         else:
-            text = f"📤 Sending video\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📤 Sending Video\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         try: await app_instance.edit_message_text(CHAT_ID, status_msg_id, text)
         except: pass
         last_time = now
@@ -134,37 +133,39 @@ async def download_tg_link(app_instance, link, output_path, step_name):
 async def deliver_video_asset(app_instance, chat_id, target_user, file_path, caption, progress_callback):
     if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
         raise Exception("Processed video is missing or empty!")
+    
     thumb_path = "thumb.jpg"
     try: subprocess.run(["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-vframes", "1", thumb_path], capture_output=True, timeout=15)
     except: pass
     if not os.path.exists(thumb_path): thumb_path = None
-    desk_msg, file_id = None, None
 
+    pm_msg, file_id = None, None
     reset_prog()
+
+    # Direct Upload to user or chat
     try:
-        desk_msg = await asyncio.wait_for(
-            app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_path, caption=f"🎬 Logs: {caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), timeout=1800
+        pm_msg = await asyncio.wait_for(
+            app_instance.send_document(chat_id=target_user, document=file_path, caption=caption, thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), timeout=1800
         )
-        file_id = desk_msg.document.file_id
-    except: pass
+        if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+    except Exception:
+        try:
+            pm_msg = await asyncio.wait_for(
+                app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), timeout=1800
+            )
+            if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+        except: pass
 
-    pm_msg = None
-    try:
-        if file_id: pm_msg = await app_instance.send_document(chat_id=target_user, document=file_id, caption=caption)
-        else:
-            reset_prog()
-            pm_msg = await asyncio.wait_for(app_instance.send_document(chat_id=target_user, document=file_path, caption=caption, thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), timeout=1800)
-    except Exception as e_pm:
-        if not pm_msg:
-            try: await app_instance.send_message(chat_id, text=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Bot ko private me Start karein.", parse_mode=ParseMode.HTML)
-            except: pass
+    # Fast log forward without double upload
+    if file_id:
+        try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"🎬 Logs: {caption}\nTarget User: `{target_user}`")
+        except: pass
 
-    return pm_msg or desk_msg
+    return pm_msg
 
 async def main():
     global status_msg_id
     
-    # Speed optimized: Set client workers to 16 for faster pipeline handling
     app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
     await app.start()
 
@@ -223,29 +224,22 @@ async def main():
 
         await app.stop()
 
-        # ---------------- PHASE 2: ENCODE ----------------
-        process_title = "Compress/extract" if TASK_TYPE == "compress" else "Encoding/resize"
+        # ---------------- ENCODE PHASE ----------------
+        process_title = "Compressing" if TASK_TYPE == "compress" else "Encoding Hardsub"
 
         if TASK_TYPE == "compress":
-            # Strict subtitle extraction logic directly to ASS
+            # 🔥 RESTORED: SOFT SUBTITLE EXTRACTION LOGIC
             raw_sub = "raw_sub.ass"
             if os.path.exists(raw_sub): os.remove(raw_sub)
             
-            print("DEBUG: Initiating subtitle extraction...")
-            # Try to map first subtitle track strictly to raw_sub.ass
             res_ex = subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", "0:s:0", raw_sub], capture_output=True, text=True, timeout=45)
-            print("FFMPEG OUT:", res_ex.stdout)
-            print("FFMPEG ERR:", res_ex.stderr)
             
             if os.path.exists(raw_sub) and os.path.getsize(raw_sub) > 0:
-                print("DEBUG: Raw subtitle file generated. Cleaning up dialogues...")
                 try:
                     extract_clean_dialogues(raw_sub, sub_extracted)
-                except Exception as sub_clean_err:
-                    print(f"DEBUG: Cleanup failed ({sub_clean_err}). Falling back to copying raw ASS file.")
+                except Exception:
                     shutil.copy(raw_sub, sub_extracted)
             else:
-                print("DEBUG: Subtitle track not found or extraction failed.")
                 sub_extracted = None
 
             reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
@@ -254,10 +248,11 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
+            # 🔥 OPTIMIZED FFmpeg Command (-crf 26)
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", 
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
             ]
             
@@ -274,7 +269,7 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 10:
+                        if now - last_edit > 8:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
@@ -293,9 +288,9 @@ async def main():
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_file]
@@ -310,7 +305,7 @@ async def main():
                     line_str = line.decode('utf-8', errors='ignore').strip()
                     if "out_time_us=" in line_str:
                         now = time.time()
-                        if now - last_edit > 10:
+                        if now - last_edit > 8:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                                 asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
@@ -320,36 +315,25 @@ async def main():
             await process.wait()
             if process.returncode != 0: raise Exception("FFmpeg hardsub encoding failed.")
 
-        # ---------------- PHASE 3: UPLOAD ----------------
+        # ---------------- UPLOAD PHASE ----------------
         app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
         await app_up.start()
         await update_http_status(f"📤 Sending Video\n{get_send_bar(0)} [0.0%]")
         
+        # 1. Send Compressed/Hardsubbed Video
         await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Successful\n`{out_name}`", prog)
-        
-        # Subtitle file delivery logic in strict .ass format
+
+        # 2. 🔥 RESTORED: Send Extracted Soft Subtitle ASS File if available
         if TASK_TYPE == "compress" and sub_extracted and os.path.exists(sub_extracted):
-            print("DEBUG: Preparing extracted subtitle dispatch...")
-            sub_uploaded = False
             try:
-                sub_desk = await asyncio.wait_for(
-                    app_up.send_document(DESK_CHANNEL_ID, document=sub_extracted, caption="📄 Log: Extracted Dialogues ASS"), timeout=300
-                )
-                file_id = sub_desk.document.file_id
-                try: 
-                    await app_up.send_document(USER_ID, document=file_id, caption="📄 Extracted Dialogues ASS File")
-                    sub_uploaded = True
+                await app_up.send_document(chat_id=USER_ID, document=sub_extracted, caption="📄 Extracted Subtitles (.ass)")
+            except:
+                try: await app_up.send_document(chat_id=CHAT_ID, document=sub_extracted, caption="📄 Extracted Subtitles (.ass)")
                 except: pass
-            except Exception as e_desk:
-                print(f"DEBUG: Log desk delivery missed: {e_desk}")
             
-            # Direct backup channel if private sending failed
-            if not sub_uploaded:
-                try:
-                    await app_up.send_document(CHAT_ID, document=sub_extracted, caption="📄 Extracted Dialogues ASS File")
-                    print("DEBUG: Direct group dispatch successful.")
-                except Exception as e_backup:
-                    print(f"DEBUG: Direct group dispatch missed: {e_backup}")
+            try:
+                await app_up.send_document(chat_id=DESK_CHANNEL_ID, document=sub_extracted, caption="📄 Log: Extracted Subtitles (.ass)")
+            except: pass
 
         try: await app_up.delete_messages(CHAT_ID, status_msg_id)
         except: pass
