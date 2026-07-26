@@ -52,12 +52,13 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # Setup Python with Flexible Path Search (**/requirements.txt)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
-          cache-dependency-path: 'Samia-main/requirements.txt'
+          cache-dependency-path: '**/requirements.txt'
 
       # ==========================================
       # 🚀 FFMPEG CACHING (Zero Redownload)
@@ -88,7 +89,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r Samia-main/requirements.txt
+          if [ -f "requirements.txt" ]; then pip install -r requirements.txt; elif [ -f "Samia-main/requirements.txt" ]; then pip install -r Samia-main/requirements.txt; fi
 
       # ==========================================
       # ⚡ EXECUTE ENCODER SCRIPT
@@ -110,4 +111,4 @@ jobs:
           FONT_LINK: ${{ github.event.inputs.font_link }}
           TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
         run: |
-          python Samia-main/encorder.py
+          if [ -f "encorder.py" ]; then python encorder.py; elif [ -f "Samia-main/encorder.py" ]; then python Samia-main/encorder.py; fi
