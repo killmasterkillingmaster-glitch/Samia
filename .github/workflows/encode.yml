@@ -1,35 +1,51 @@
-name: Manga Processing Pipeline
+name: Encode and Hardsub Pipeline
 
 on:
   workflow_dispatch:
     inputs:
-      file_id:
-        description: 'Telegram File ID'
+      task_type:
+        description: 'Task Type (compress or hardsub)'
         required: true
+      video_id:
+        description: 'Telegram Video Link'
+        required: true
+      sub_id:
+        description: 'Subtitle Link'
+        required: false
+        default: 'none'
       chat_id:
         description: 'Telegram Chat ID'
-        required: true
-      msg_id:
-        description: 'Telegram Message ID'
         required: true
       user_id:
         description: 'Telegram User ID'
         required: true
-      lang:
-        description: 'Language Target'
-        required: true
-      style:
-        description: 'Typeset Style'
-        required: true
-      fname:
-        description: 'Original Filename'
-        required: true
-      mode:
-        description: 'Execution Mode (extract/render)'
-        required: true
+      resolution:
+        description: 'Video Resolution'
+        required: false
+        default: 'none'
+      wm_id:
+        description: 'Watermark Link'
+        required: false
+        default: 'none'
+      wm_pos:
+        description: 'Watermark Position'
+        required: false
+        default: 'none'
+      rename:
+        description: 'Custom Output Name'
+        required: false
+        default: 'none'
+      font_link:
+        description: 'Custom Font Link'
+        required: false
+        default: 'none'
+      trigger_msg_id:
+        description: 'Trigger Status Message ID'
+        required: false
+        default: 'none'
 
 jobs:
-  process:
+  encode_job:
     runs-on: ubuntu-latest
 
     steps:
@@ -75,19 +91,23 @@ jobs:
           pip install -r Samia-main/requirements.txt
 
       # ==========================================
-      # ⚡ EXECUTE SCRIPT
+      # ⚡ EXECUTE ENCODER SCRIPT
       # ==========================================
-      - name: Run Encoding / Extraction Engine
+      - name: Run Encoding Worker
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TASK_TYPE: ${{ github.event.inputs.task_type }}
+          VIDEO_ID: ${{ github.event.inputs.video_id }}
+          SUB_ID: ${{ github.event.inputs.sub_id }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           USER_ID: ${{ github.event.inputs.user_id }}
-          FILE_ID: ${{ github.event.inputs.file_id }}
-          TASK_MODE: ${{ github.event.inputs.mode }}
-          LANG: ${{ github.event.inputs.lang }}
-          STYLE: ${{ github.event.inputs.style }}
-          FNAME: ${{ github.event.inputs.fname }}
+          RESOLUTION: ${{ github.event.inputs.resolution }}
+          WM_ID: ${{ github.event.inputs.wm_id }}
+          WM_POS: ${{ github.event.inputs.wm_pos }}
+          RENAME: ${{ github.event.inputs.rename }}
+          FONT_LINK: ${{ github.event.inputs.font_link }}
+          TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
         run: |
           python Samia-main/encorder.py
