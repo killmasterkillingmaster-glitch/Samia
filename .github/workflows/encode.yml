@@ -1,97 +1,93 @@
-name: Video Encoder Workflow
-
-# Auto-Queue System (Single Task Execution)
-concurrency:
-  group: processing
-  cancel-in-progress: false
+name: Manga Processing Pipeline
 
 on:
   workflow_dispatch:
     inputs:
-      task_type:
-        required: true
-      video_id:
-        required: true
-      sub_id:
+      file_id:
+        description: 'Telegram File ID'
         required: true
       chat_id:
+        description: 'Telegram Chat ID'
+        required: true
+      msg_id:
+        description: 'Telegram Message ID'
         required: true
       user_id:
+        description: 'Telegram User ID'
         required: true
-      resolution:
+      lang:
+        description: 'Language Target'
         required: true
-      wm_id:
+      style:
+        description: 'Typeset Style'
         required: true
-      wm_pos:
+      fname:
+        description: 'Original Filename'
         required: true
-      rename:
-        required: true
-      font_link:
-        required: true
-      trigger_msg_id:
+      mode:
+        description: 'Execution Mode (extract/render)'
         required: true
 
 jobs:
-  encode_job:
+  process:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Bin Directory
-        run: mkdir -p ${{ github.workspace }}/bin
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: 'Samia-main/requirements.txt'
 
-      # Static FFmpeg binary cache setup to prevent redownloads across workflow triggers
-      - name: Cache FFmpeg Binaries
+      # ==========================================
+      # 🚀 FFMPEG CACHING (Zero Redownload)
+      # ==========================================
+      - name: Cache FFmpeg Static Binary
         id: cache-ffmpeg
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/bin
-          key: ${{ runner.os }}-ffmpeg-static-v2
+          path: ~/.local/bin/ffmpeg-binary
+          key: ffmpeg-static-v6.0
 
-      - name: Install FFmpeg Static (On Cache Miss)
+      - name: Install Static FFmpeg if not cached
         if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: |
-          cd ${{ github.workspace }}/bin
+          mkdir -p ~/.local/bin/ffmpeg-binary
+          cd ~/.local/bin/ffmpeg-binary
           wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
           tar -xf ffmpeg-release-amd64-static.tar.xz --strip-components=1
-          rm -f ffmpeg-release-amd64-static.tar.xz
+          rm ffmpeg-release-amd64-static.tar.xz
 
-      - name: Configure System Path & Fontconfig
+      - name: Add FFmpeg to PATH
         run: |
-          echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
-          sudo apt-get update && sudo apt-get install -y fontconfig
+          echo "$HOME/.local/bin/ffmpeg-binary" >> $GITHUB_PATH
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: 'pip' # Automated caching of Python package downloads
+      # ==========================================
+      # 📦 PYTHON DEPENDENCIES INSTALLATION
+      # ==========================================
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r Samia-main/requirements.txt
 
-      - name: Install Python Dependencies
-        run: pip install pyrogram tgcrypto pysubs2 requests fonttools
-        
-      - name: Run Dedicated Video Worker
+      # ==========================================
+      # ⚡ EXECUTE SCRIPT
+      # ==========================================
+      - name: Run Encoding / Extraction Engine
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TASK_TYPE: ${{ github.event.inputs.task_type }}
-          VIDEO_ID: ${{ github.event.inputs.video_id }}
-          SUB_ID: ${{ github.event.inputs.sub_id }}
           CHAT_ID: ${{ github.event.inputs.chat_id }}
           USER_ID: ${{ github.event.inputs.user_id }}
-          RESOLUTION: ${{ github.event.inputs.resolution }}
-          WM_ID: ${{ github.event.inputs.wm_id }}
-          WM_POS: ${{ github.event.inputs.wm_pos }}
-          RENAME: ${{ github.event.inputs.rename }}
-          FONT_LINK: ${{ github.event.inputs.font_link }}
-          TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
-        run: python encorder.py
-        
-      - name: Cleanup Temporary Assets
-        if: always()
+          FILE_ID: ${{ github.event.inputs.file_id }}
+          TASK_MODE: ${{ github.event.inputs.mode }}
+          LANG: ${{ github.event.inputs.lang }}
+          STYLE: ${{ github.event.inputs.style }}
+          FNAME: ${{ github.event.inputs.fname }}
         run: |
-          # Deletes media assets safely without breaking the cached 'bin' directory
-          rm -f video.mkv watermark.png ready_sub.ass custom_font.ttf raw_sub.ass raw_sub.srt output.mp4 *.mp4 *.ass *.srt
+          python Samia-main/encorder.py
