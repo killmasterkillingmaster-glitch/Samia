@@ -124,7 +124,17 @@ async def download_tg_link(app_instance, link, output_path, step_name):
     msg_id = int(link.split("/")[-1])
     try:
         msg = await app_instance.get_messages(CHAT_ID, msg_id)
-        if msg.document or msg.video or msg.photo or msg.animation:
+        if msg and (msg.document or msg.video or msg.photo or msg.animation):
+            # सुरक्षित एक्सटेंशन प्राप्त करने के लिए
+            ext = ""
+            if msg.document and msg.document.file_name:
+                _, ext = os.path.splitext(msg.document.file_name)
+            elif msg.video and msg.video.file_name:
+                _, ext = os.path.splitext(msg.video.file_name)
+            
+            if ext and not output_path.endswith(ext.lower()):
+                output_path = output_path + ext.lower()
+
             reset_prog()
             return await asyncio.wait_for(msg.download(file_name=output_path, progress=prog, progress_args=(app_instance, step_name)), timeout=1800)
     except: pass
@@ -202,23 +212,42 @@ async def main():
             sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "hardsub_download")
             if not sub_file: raise Exception("Subtitle pipeline download failure.")
 
-            try: subs = pysubs2.load(sub_file, encoding="utf-8")
-            except: subs = pysubs2.load(sub_file, encoding="latin-1")
-
+            # .ass फ़ाइल के मूल गुणों को सुरक्षित रखना
             if sub_file.lower().endswith('.ass'):
-                with open(sub_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    if any(word in f.read().lower() for word in ["logo", "watermark", "cr", "credit"]): has_watermark = True
+                try:
+                    with open(sub_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        ass_content = f.read()
+                except Exception:
+                    with open(sub_file, 'r', encoding='latin-1', errors='ignore') as f:
+                        ass_content = f.read()
+
+                if any(word in ass_content.lower() for word in ["logo", "watermark", "cr", "credit"]): 
+                    has_watermark = True
+
                 if FONT_LINK != "none":
-                    for style_obj in subs.styles.values(): style_obj.fontname = font_name
+                    lines = ass_content.splitlines()
+                    new_lines = []
+                    for line in lines:
+                        if line.strip().startswith("Style:"):
+                            parts = line.split(",", 2)
+                            if len(parts) >= 3:
+                                line = f"{parts[0]},{font_name},{parts[2]}"
+                        new_lines.append(line)
+                    with open("ready_sub.ass", "w", encoding="utf-8") as f:
+                        f.write("\n".join(new_lines))
+                else:
+                    shutil.copy(sub_file, "ready_sub.ass")
             else:
+                try: subs = pysubs2.load(sub_file, encoding="utf-8")
+                except: subs = pysubs2.load(sub_file, encoding="latin-1")
+
                 new_subs = pysubs2.SSAFile()
                 new_subs.styles["Default"] = pysubs2.SSAStyle(fontname=font_name, fontsize=24, primarycolor=pysubs2.Color(255, 255, 255), outlinecolor=pysubs2.Color(0, 0, 0), outline=2, shadow=1, marginl=20, marginr=20, marginv=15)
                 for line in subs:
                     clean_text = re.sub(r'<[^>]+>', '', re.sub(r'\{[^}]+\}', '', line.text)).replace('\r', '').replace('\n', '\\N').strip()
                     if clean_text: new_subs.append(pysubs2.SSAEvent(start=line.start, end=line.end, text=clean_text, style="Default"))
-                subs = new_subs
+                new_subs.save("ready_sub.ass")
 
-            subs.save("ready_sub.ass")
             if WM_ID != "none" and not has_watermark:
                 wm_file = await download_tg_link(app, WM_ID, "watermark.png", "hardsub_download")
 
@@ -228,7 +257,6 @@ async def main():
         process_title = "Compressing" if TASK_TYPE == "compress" else "Encoding Hardsub"
 
         if TASK_TYPE == "compress":
-            # 🔥 RESTORED: SOFT SUBTITLE EXTRACTION LOGIC
             raw_sub = "raw_sub.ass"
             if os.path.exists(raw_sub): os.remove(raw_sub)
             
@@ -248,7 +276,6 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # 🔥 OPTIMIZED FFmpeg Command (-crf 26)
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
@@ -323,7 +350,7 @@ async def main():
         # 1. Send Compressed/Hardsubbed Video
         await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Successful\n`{out_name}`", prog)
 
-        # 2. 🔥 RESTORED: Send Extracted Soft Subtitle ASS File if available
+        # 2. Send Extracted Soft Subtitle ASS File if available
         if TASK_TYPE == "compress" and sub_extracted and os.path.exists(sub_extracted):
             try:
                 await app_up.send_document(chat_id=USER_ID, document=sub_extracted, caption="📄 Extracted Subtitles (.ass)")
