@@ -40,13 +40,13 @@ def get_download_bar(percent):
 
 def get_process_bar(percent):
     filled = int(percent / 100 * 20)
-    seq = ["тАв", "┬░", ":", "┬░", "тАв", ":"]
+    seq = ["•", "°", ":", "°", "•", ":"]
     bar = "".join(seq[i % len(seq)] for i in range(filled))
     return f"[{bar}{'-' * (20 - filled)}]"
 
 def get_send_bar(percent):
     filled = int(percent / 100 * 20)
-    return f"[{'тЦУ' * filled}{'тЦТ' * (20 - filled)}]"
+    return f"[{'▓' * filled}{'▒' * (20 - filled)}]"
 
 def _sync_http_edit(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
@@ -72,9 +72,9 @@ async def prog(c, t, app_instance, step_name):
         percent = (c / t) * 100 if t > 0 else 0
         
         if step_name in ["hardsub_download", "compress_download"]:
-            text = f"ЁЯУе Downloading Video\n{get_download_bar(percent)} [{percent:.1f}%]\nЁЯЪА Speed: {speed_mb:.2f} MB/s\nЁЯУж {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📥 Downloading Video\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         else:
-            text = f"ЁЯУд Sending Video\n{get_send_bar(percent)} [{percent:.1f}%]\nЁЯЪА Speed: {speed_mb:.2f} MB/s\nЁЯУж {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📤 Sending Video\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: {speed_mb:.2f} MB/s\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         try: await app_instance.edit_message_text(CHAT_ID, status_msg_id, text)
         except: pass
         last_time = now
@@ -135,7 +135,7 @@ async def download_tg_link(app_instance, link, output_path, step_name):
     try:
         msg = await app_instance.get_messages(CHAT_ID, msg_id)
         if msg and (msg.document or msg.video or msg.photo or msg.animation):
-            # рд╕реБрд░рдХреНрд╖рд┐рдд рдПрдХреНрд╕рдЯреЗрдВрд╢рди рдкреНрд░рд╛рдкреНрдд рдХрд░рдиреЗ рдХреЗ рд▓рд┐рдП
+            # सुरक्षित एक्सटेंशन प्राप्त करने के लिए
             ext = ""
             if msg.document and msg.document.file_name:
                 _, ext = os.path.splitext(msg.document.file_name)
@@ -171,14 +171,14 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
     except Exception:
         try:
             pm_msg = await asyncio.wait_for(
-                app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"тЪая╕П <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), timeout=1800
+                app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), timeout=1800
             )
             if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
         except: pass
 
     # Fast log forward without double upload
     if file_id:
-        try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"ЁЯОм Logs: {caption}\nTarget User: `{target_user}`")
+        try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"🎬 Logs: {caption}\nTarget User: `{target_user}`")
         except: pass
 
     return pm_msg
@@ -189,7 +189,7 @@ async def main():
     app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=10, no_updates=True)
     await app.start()
 
-    # ЁЯФе Peer cache warm-up: fresh session har run me naya hota hai (GH Actions),
+    # 🔥 Peer cache warm-up: fresh session har run me naya hota hai (GH Actions),
     # isliye get_messages/download se pehle chat resolve karna zaroori hai warna
     # pyrogram andar hi andar retries/backoff karta hai jo 1-2 min slow kar deta hai
     try: await app.get_chat(CHAT_ID)
@@ -199,7 +199,7 @@ async def main():
         try: await app.delete_messages(CHAT_ID, int(TRIGGER_MSG_ID))
         except: pass
 
-    init_msg = await app.send_message(CHAT_ID, "тЪЩя╕П Worker initialized. Preparing fast downloads...")
+    init_msg = await app.send_message(CHAT_ID, "⚙️ Worker initialized. Preparing fast downloads...")
     status_msg_id = init_msg.id
 
     try:
@@ -228,7 +228,7 @@ async def main():
             sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "hardsub_download")
             if not sub_file: raise Exception("Subtitle pipeline download failure.")
 
-            # .ass рдлрд╝рд╛рдЗрд▓ рдХреЗ рдореВрд▓ рдЧреБрдгреЛрдВ рдХреЛ рд╕реБрд░рдХреНрд╖рд┐рдд рд░рдЦрдирд╛ (extension ke bajaye content check)
+            # .ass फ़ाइल के मूल गुणों को सुरक्षित रखना (extension ke bajaye content check)
             if sub_file.lower().endswith('.ass') or is_ass_format(sub_file):
                 try:
                     with open(sub_file, 'r', encoding='utf-8', errors='ignore') as f:
@@ -290,7 +290,7 @@ async def main():
             if reso_clean and reso_clean.lower() != "none": scale_filter = f"scale=-2:{reso_clean}"
             else: scale_filter = "scale='trunc(iw/2)*2:trunc(ih/2)*2'"
 
-            await update_http_status(f"тЪЩя╕П {process_title}\n{get_process_bar(0)} [0.0%]")
+            await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
@@ -319,7 +319,7 @@ async def main():
                         if now - last_edit > 8:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
-                                asyncio.create_task(update_http_status(f"тЪЩя╕П {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
+                                asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
                             except: pass
                             last_edit = now
             await read_stdout()
@@ -333,7 +333,7 @@ async def main():
             v_filter = f"scale='trunc(iw/2)*2:trunc(ih/2)*2',{vf_filter}"
             overlay_coord = "W-w-15:15" if WM_POS == "right" else "15:15"
 
-            await update_http_status(f"тЪЩя╕П {process_title}\n{get_process_bar(0)} [0.0%]")
+            await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
             if wm_file and os.path.exists(wm_file):
                 cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
@@ -360,7 +360,7 @@ async def main():
                         if now - last_edit > 8:
                             try:
                                 percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
-                                asyncio.create_task(update_http_status(f"тЪЩя╕П {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
+                                asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
                             except: pass
                             last_edit = now
             await read_stdout()
@@ -373,21 +373,21 @@ async def main():
         await app_up.start()
         try: await app_up.get_chat(CHAT_ID)
         except: pass
-        await update_http_status(f"ЁЯУд Sending Video\n{get_send_bar(0)} [0.0%]")
+        await update_http_status(f"📤 Sending Video\n{get_send_bar(0)} [0.0%]")
         
         # 1. Send Compressed/Hardsubbed Video
-        await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"тЬЕ Successful\n`{out_name}`", prog)
+        await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Successful\n`{out_name}`", prog)
 
         # 2. Send Extracted Soft Subtitle ASS File if available
         if TASK_TYPE == "compress" and sub_extracted and os.path.exists(sub_extracted):
             try:
-                await app_up.send_document(chat_id=USER_ID, document=sub_extracted, caption="ЁЯУД Extracted Subtitles (.ass)")
+                await app_up.send_document(chat_id=USER_ID, document=sub_extracted, caption="📄 Extracted Subtitles (.ass)")
             except:
-                try: await app_up.send_document(chat_id=CHAT_ID, document=sub_extracted, caption="ЁЯУД Extracted Subtitles (.ass)")
+                try: await app_up.send_document(chat_id=CHAT_ID, document=sub_extracted, caption="📄 Extracted Subtitles (.ass)")
                 except: pass
             
             try:
-                await app_up.send_document(chat_id=DESK_CHANNEL_ID, document=sub_extracted, caption="ЁЯУД Log: Extracted Subtitles (.ass)")
+                await app_up.send_document(chat_id=DESK_CHANNEL_ID, document=sub_extracted, caption="📄 Log: Extracted Subtitles (.ass)")
             except: pass
 
         try: await app_up.delete_messages(CHAT_ID, status_msg_id)
@@ -395,7 +395,7 @@ async def main():
         await app_up.stop()
 
     except Exception as e:
-        try: _sync_http_edit(f"тЭМ **Workflow Error:**\n<code>{html.escape(str(e))}</code>")
+        try: _sync_http_edit(f"❌ **Workflow Error:**\n<code>{html.escape(str(e))}</code>")
         except: pass
 
 if __name__ == "__main__":
