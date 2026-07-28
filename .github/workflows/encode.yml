@@ -45,6 +45,11 @@ on:
         required: false
         default: 'none'
 
+# Yeh block sequence queue (1-by-1 execution) ensure karta hai
+concurrency:
+  group: video-encoding-queue
+  cancel-in-progress: false
+
 jobs:
   encode_job:
     runs-on: ubuntu-latest
@@ -59,10 +64,16 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      - name: Install System Dependencies (FFmpeg & Fonts)
+      # Fast static FFmpeg setup (apt-get se tez start hoga)
+      - name: Install Fast FFmpeg Static Build
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-liberation
+          mkdir -p ffmpeg_bin
+          cd ffmpeg_bin
+          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg-release-amd64-static.tar.xz --strip-components=1
+          sudo mv ffmpeg ffprobe /usr/local/bin/
+          cd ..
+          rm -rf ffmpeg_bin
 
       - name: Install Python Dependencies
         run: |
