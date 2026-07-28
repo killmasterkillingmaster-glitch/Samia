@@ -12,7 +12,7 @@ API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 REPO_NAME = os.getenv("REPO_NAME", "").strip()  # Format: username/repo_name
-PORT = int(os.getenv("PORT", "10000"))  # Render assigns PORT dynamically
+PORT = int(os.getenv("PORT", 7860))
 
 OWNER_ID = 5344078567
 ALLOWED_USER = 5351848105
