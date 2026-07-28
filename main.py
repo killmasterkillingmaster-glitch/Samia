@@ -1,38 +1,27 @@
-import os, re, asyncio, threading, requests, psutil
+import os, re, time, asyncio, threading, requests, psutil
 from pyrogram import Client, filters, idle
-from pyrogram.types import Message, CallbackQuery
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ChatType
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from dotenv import load_dotenv
-
-load_dotenv()
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-REPO_NAME = os.getenv("REPO_NAME", "").strip()  # Format: username/repo_name
-PORT = int(os.getenv("PORT", 7860))
+REPO_NAME = os.getenv("REPO_NAME", "").strip()  
+
+# ZEABUR PORT FIX
+PORT = int(os.getenv("PORT", 8080))
 
 OWNER_ID = 5344078567
 ALLOWED_USER = 5351848105
 GROUP_ID = -1003899919015
+DESK_CHANNEL_ID = -1003700822969
 
 app = Client("HarsubBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
 
 users_data = {}
 wm_positions = {} 
-
-# --- Render Port Binding (Health Check) ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot Mind Operational on Render!")
-
-def run_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-    server.serve_forever()
 
 def is_authorized(m: Message):
     if not m.from_user: return False
@@ -50,6 +39,20 @@ async def check_command_privacy(c, m: Message):
         await m.reply(f"❌ **Aap is Bot ko Private mein use nahi kar sakte!**\n\n👉 Humara [Official Group]({invite_link}) join karein.", disable_web_page_preview=True)
         return False
     return is_authorized(m)
+
+async def is_github_busy():
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    url_in_progress = f"https://api.github.com/repos/{REPO_NAME}/actions/runs?status=in_progress"
+    url_queued = f"https://api.github.com/repos/{REPO_NAME}/actions/runs?status=queued"
+    try:
+        r_in = await asyncio.to_thread(requests.get, url_in_progress, headers=headers)
+        r_qu = await asyncio.to_thread(requests.get, url_queued, headers=headers)
+        if r_in.status_code == 200 and r_qu.status_code == 200:
+            count = r_in.json().get("total_count", 0) + r_qu.json().get("total_count", 0)
+            return count > 0
+    except Exception as e:
+        print(f"GH API Error: {e}")
+    return False
 
 def _send_to_github(task):
     url = f"https://api.github.com/repos/{REPO_NAME}/actions/workflows/encode.yml/dispatches"
@@ -86,7 +89,7 @@ async def general_cmds(c, m: Message):
 
     if cmd == "stats":
         ram = psutil.virtual_memory(); cpu = psutil.cpu_percent()
-        await m.reply(f"📊 **Bot diagnostics (Render):**\n🖥️ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%`")
+        await m.reply(f"📊 **Bot diagnostics:**\n🖥️ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%`")
     elif cmd == "addposition":
         if len(m.command) < 2 or m.command[1].lower() not in ["left", "right"]: return await m.reply("❌ Usage: /addposition left|right")
         wm_positions[m.chat.id] = m.command[1].lower()
@@ -106,16 +109,19 @@ async def general_cmds(c, m: Message):
             await m.reply("🗑️ Registry removed.")
         else: await m.reply("❌ Registry not found.")
 
-@app.on_message(filters.command(["1080p", "720p", "480p"]))
+RES_CMD_MAP = {"1080t": "1080p", "720t": "720p", "480t": "480p"}
+
+@app.on_message(filters.command(["1080t", "720t", "480t"]))
 async def compress_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
     if not media: return await m.reply("❌ Compression task ke liye kisi valid video/document par reply karein.")
     
-    cmd = m.command[0].lower()
-    orig_name = getattr(media, "file_name", "output.mp4")
+    if await is_github_busy(): return await m.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai. Ek complete hone dein.")
 
-    st = await m.reply("⏳ **Task Dispatched to GitHub Actions!**")
+    cmd = RES_CMD_MAP[m.command[0].lower()]
+    orig_name = getattr(media, "file_name", "output.mp4")
+    st = await m.reply("⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*")
     font_link = await get_pinned_file_link(m.chat.id, "file")
 
     payload = {
@@ -126,14 +132,15 @@ async def compress_cmd(c, m: Message):
     }
     await trigger_github(payload)
 
-@app.on_message(filters.command("hsub"))
+@app.on_message(filters.command("hp"))
 async def hsub_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
     if not media: return await m.reply("❌ Hardsub ke liye kisi forwarded video par reply karein.")
+    
+    if await is_github_busy(): return await m.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai. Ek complete hone dein.")
 
     orig_name = getattr(media, "file_name", "output.mp4")
-
     await m.reply("send file (vtt/srt/ass)")
     users_data[m.from_user.id] = {"video_msg_id": m.reply_to_message.id, "chat_id": m.chat.id, "state": "WAIT_SUB", "rename": "none", "orig_name": orig_name}
 
@@ -165,25 +172,17 @@ async def replies_controller(c, m: Message):
             session["sub_msg_link"] = "none"
             session["state"] = "WAIT_RENAME_CHOICE"
             await m.reply("Rename type R\nSame name type s")
-        else:
-            await m.reply("❌ Invalid format! Please send a valid subtitle file (.srt, .ass, .vtt, .txt) or type `S` to skip.")
+        else: await m.reply("❌ Invalid format! Please send a valid subtitle file (.srt, .ass, .vtt, .txt) or type `S` to skip.")
         return
 
     if state == "WAIT_RENAME_CHOICE":
-        if text == "R":
-            session["state"] = "WAIT_RENAME_VALUE"
-            await m.reply("Send name")
-        elif text == "S":
-            session["rename"] = session["orig_name"]
-            await prompt_watermark_or_execute(c, m, user_id, session)
-        else:
-            await m.reply("❌ Invalid! Type `R` to rename or `S` to skip.")
+        if text == "R": session["state"] = "WAIT_RENAME_VALUE"; await m.reply("Send name")
+        elif text == "S": session["rename"] = session["orig_name"]; await prompt_watermark_or_execute(c, m, user_id, session)
+        else: await m.reply("❌ Invalid! Type `R` to rename or `S` to skip.")
         return
             
     elif state == "WAIT_RENAME_VALUE":
-        if not text:
-            await m.reply("❌ Please send a valid text name.")
-            return
+        if not text: return await m.reply("❌ Please send a valid text name.")
         raw_name = m.text.strip()
         if raw_name.lower().endswith(".mp4"): raw_name = raw_name[:-4]
         session["rename"] = re.sub(r'[^\w\-_]', '_', raw_name) + ".mp4"
@@ -193,15 +192,13 @@ async def replies_controller(c, m: Message):
     elif state == "WAIT_WM_CHOICE":
         if text == "A": session["watermark"] = "yes"
         elif text == "S": session["watermark"] = "no"
-        else:
-            await m.reply("❌ Invalid! Type `A` to add watermark or `S` to skip.")
-            return
+        else: return await m.reply("❌ Invalid! Type `A` to add watermark or `S` to skip.")
         await execute_dispatch_hardsub(user_id, m)
 
 async def execute_dispatch_hardsub(user_id, msg: Message):
     data = users_data.pop(user_id)
-    st = await msg.reply(f"⏳ **Task Dispatched to GitHub Actions!**")
-
+    if await is_github_busy(): return await msg.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai.")
+    st = await msg.reply(f"⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*")
     wm_link = "none"
     wm_pos = "right"
     if data.get("watermark") == "yes":
@@ -218,6 +215,9 @@ async def execute_dispatch_hardsub(user_id, msg: Message):
 
 @app.on_callback_query(filters.regex("cancel_active_run"))
 async def cancel_run_callback(c, q: CallbackQuery):
+    if q.from_user.id not in [OWNER_ID, ALLOWED_USER]:
+        return await q.answer("❌ You are not authorized to cancel this task.", show_alert=True)
+
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     try:
         cancelled = False
@@ -237,11 +237,13 @@ async def cancel_run_callback(c, q: CallbackQuery):
         else: await q.answer("Active status par koi task nahi mila.", show_alert=True)
     except Exception as e: await q.answer(f"Abort Exception: {e}", show_alert=True)
 
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Operational")
+
 async def main():
-    # Start Health Server thread for Render PORT binding
-    threading.Thread(target=run_health_server, daemon=True).start()
     await app.start()
-    print(f"🚀 Render Controller Bot Started! Listening on Port {PORT}")
+    print("🚀 Zeabur Controller Bot Started Successfully!")
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(), daemon=True).start()
     await idle()
     await app.stop()
 
