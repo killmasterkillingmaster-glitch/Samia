@@ -10,7 +10,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 REPO_NAME = os.getenv("REPO_NAME", "").strip()  
 
-# ZEABUR PORT FIX
 PORT = int(os.getenv("PORT", 8080))
 
 OWNER_ID = 5344078567
@@ -21,12 +20,7 @@ DESK_CHANNEL_ID = -1003700822969
 app = Client("HarsubBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
 
 users_data = {}
-wm_positions = {}
-
-# ---------------- QUEUE SYSTEM ----------------
-# Only one task runs on the server at a time. Anything else gets queued
-# here and is auto-dispatched the moment the running task finishes.
-task_queue = asyncio.Queue()
+wm_positions = {} 
 
 def is_authorized(m: Message):
     if not m.from_user: return False
@@ -39,8 +33,11 @@ async def check_command_privacy(c, m: Message):
     is_pm = m.chat.type == ChatType.PRIVATE
     if is_pm and m.from_user.id in [OWNER_ID, ALLOWED_USER]: return True
     if is_pm:
-        try: chat_info = await c.get_chat(GROUP_ID); invite_link = chat_info.invite_link or "https://t.me/Mangajii"
-        except: invite_link = "https://t.me/Mangajii"
+        try: 
+            chat_info = await c.get_chat(GROUP_ID)
+            invite_link = chat_info.invite_link or "https://t.me/Mangajii"
+        except: 
+            invite_link = "https://t.me/Mangajii"
         await m.reply(f"❌ **Aap is Bot ko Private mein use nahi kar sakte!**\n\n👉 Humara [Official Group]({invite_link}) join karein.", disable_web_page_preview=True)
         return False
     return is_authorized(m)
@@ -66,30 +63,11 @@ def _send_to_github(task):
     try:
         r = requests.post(url, headers=headers, json=payload)
         return (True, "Success") if r.status_code == 204 else (False, f"Code {r.status_code}: {r.text}")
-    except Exception as e: return False, str(e)
+    except Exception as e: 
+        return False, str(e)
 
 async def trigger_github(task):
     return await asyncio.to_thread(_send_to_github, task)
-
-async def queue_processor():
-    """Background worker: dispatches queued tasks one at a time.
-    Waits for the server to be free, sends the next task, then gives
-    GitHub a moment to register the run before checking again."""
-    while True:
-        payload = await task_queue.get()
-        try:
-            while await is_github_busy():
-                await asyncio.sleep(15)
-            ok, info = await trigger_github(payload)
-            if not ok:
-                print(f"Dispatch Failed: {info}")
-            # buffer so GitHub's API has time to report the run as
-            # queued/in_progress before we check busy status again
-            await asyncio.sleep(25)
-        except Exception as e:
-            print(f"Queue Processor Error: {e}")
-        finally:
-            task_queue.task_done()
 
 async def get_pinned_file_link(chat_id, target_name):
     try:
@@ -101,26 +79,31 @@ async def get_pinned_file_link(chat_id, target_name):
             if msg.text and f"Name – {target_name}" in msg.text:
                 match = re.search(r"Link – (https://\S+)", msg.text)
                 if match: return match.group(1)
-    except: pass
+    except: 
+        pass
     return "none"
 
 @app.on_message(filters.command(["start", "stats", "addposition", "admark", "deletmark", "addfont", "removefont"]))
 async def general_cmds(c, m: Message):
     cmd = m.command[0]
     if cmd == "start" and m.chat.type == ChatType.PRIVATE:
-        if m.from_user.id in [OWNER_ID, ALLOWED_USER]: return await m.reply("🙋‍♂️ Welcome Owner!")
+        if m.from_user.id in [OWNER_ID, ALLOWED_USER]: 
+            return await m.reply("🙋‍♂️ Welcome Owner!")
         return await check_command_privacy(c, m)
     if not await check_command_privacy(c, m): return
 
     if cmd == "stats":
-        ram = psutil.virtual_memory(); cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory()
+        cpu = psutil.cpu_percent()
         await m.reply(f"📊 **Bot diagnostics:**\n🖥️ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%`")
     elif cmd == "addposition":
-        if len(m.command) < 2 or m.command[1].lower() not in ["left", "right"]: return await m.reply("❌ Usage: /addposition left|right")
+        if len(m.command) < 2 or m.command[1].lower() not in ["left", "right"]: 
+            return await m.reply("❌ Usage: /addposition left|right")
         wm_positions[m.chat.id] = m.command[1].lower()
         await m.reply(f"✅ Watermark position updated: **{m.command[1].upper()}**")
     elif cmd in ["admark", "addfont"]:
-        if not m.reply_to_message or not (m.reply_to_message.photo or m.reply_to_message.document): return await m.reply("❌ Reply to a file.")
+        if not m.reply_to_message or not (m.reply_to_message.photo or m.reply_to_message.document): 
+            return await m.reply("❌ Reply to a file.")
         msg_link = f"https://t.me/c/{str(m.chat.id)[4:]}/{m.reply_to_message.id}"
         t_name = "watermark" if cmd == "admark" else "file"
         pinned = await m.reply(f"ID – {m.from_user.id}\nLink – {msg_link}\nName – {t_name}")
@@ -132,7 +115,8 @@ async def general_cmds(c, m: Message):
         if chat.pinned_message and f"Name – {t_name}" in chat.pinned_message.text:
             await chat.pinned_message.unpin()
             await m.reply("🗑️ Registry removed.")
-        else: await m.reply("❌ Registry not found.")
+        else: 
+            await m.reply("❌ Registry not found.")
 
 RES_CMD_MAP = {"1080g": "1080p", "720g": "720p", "480g": "480p"}
 
@@ -140,17 +124,18 @@ RES_CMD_MAP = {"1080g": "1080p", "720g": "720p", "480g": "480p"}
 async def compress_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
-    if not media: return await m.reply("❌ Compression task ke liye kisi valid video/document par reply karein.")
-
+    if not media: 
+        return await m.reply("❌ Compression task ke liye kisi valid video/document par reply karein.")
+    
     cmd = RES_CMD_MAP[m.command[0].lower()]
     orig_name = getattr(media, "file_name", "output.mp4")
+    
+    # Check if busy just to change status text (we don't block anymore)
+    is_busy = await is_github_busy()
+    status_text = "⏳ **Task Queued!**\nServer abhi busy hai, aapka task queue me lag gaya hai aur pichle tasks khatam hote hi automatic chalega." if is_busy else "⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*"
+    
+    st = await m.reply(status_text)
     font_link = await get_pinned_file_link(m.chat.id, "file")
-
-    busy = await is_github_busy()
-    if busy or not task_queue.empty():
-        st = await m.reply("🕐 **Task Queued!**\nPichla task complete hote hi ye automatically start ho jayega.")
-    else:
-        st = await m.reply("⏳ **Task Dispatched to Server!**\n*Note: Server start hone me 1-2 min lagte hain.*")
 
     payload = {
         "task_type": "compress", "video_id": f"https://t.me/c/{str(m.chat.id)[4:]}/{m.reply_to_message.id}",
@@ -158,23 +143,24 @@ async def compress_cmd(c, m: Message):
         "resolution": cmd, "wm_id": "none", "wm_pos": "none", "rename": orig_name, 
         "font_link": font_link, "trigger_msg_id": str(st.id)
     }
-    await task_queue.put(payload)
+    await trigger_github(payload)
 
 @app.on_message(filters.command("sub"))
 async def hsub_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
-    if not media: return await m.reply("❌ Hardsub ke liye kisi forwarded video par reply karein.")
+    if not media: 
+        return await m.reply("❌ Hardsub ke liye kisi forwarded video par reply karein.")
 
     orig_name = getattr(media, "file_name", "output.mp4")
-    await m.reply("send file (vtt/srt/ass)")
+    await m.reply("Send subtitle file (vtt/srt/ass) or type `S` to skip.")
     users_data[m.from_user.id] = {"video_msg_id": m.reply_to_message.id, "chat_id": m.chat.id, "state": "WAIT_SUB", "rename": "none", "orig_name": orig_name}
 
 async def prompt_watermark_or_execute(c, m, user_id, session):
     wm_link = await get_pinned_file_link(session["chat_id"], "watermark")
     if wm_link != "none":
         session["state"] = "WAIT_WM_CHOICE"
-        await m.reply("Add watermark\nSend A skip type s")
+        await m.reply("Add watermark? Type `A` for Add or `S` to skip.")
     else:
         session["watermark"] = "no"
         await execute_dispatch_hardsub(user_id, m)
@@ -193,57 +179,65 @@ async def replies_controller(c, m: Message):
         if m.document and m.document.file_name and m.document.file_name.lower().endswith(('.srt', '.ass', '.vtt', '.txt')):
             session["sub_msg_link"] = f"https://t.me/c/{str(m.chat.id)[4:]}/{m.id}"
             session["state"] = "WAIT_RENAME_CHOICE"
-            await m.reply("Rename type R\nSame name type s")
+            await m.reply("Rename type `R` / Same name type `S`")
         elif text == "S":
             session["sub_msg_link"] = "none"
             session["state"] = "WAIT_RENAME_CHOICE"
-            await m.reply("Rename type R\nSame name type s")
-        else: await m.reply("❌ Invalid format! Please send a valid subtitle file (.srt, .ass, .vtt, .txt) or type `S` to skip.")
+            await m.reply("Rename type `R` / Same name type `S`")
+        else: 
+            await m.reply("❌ Invalid format! Please send a valid subtitle file (.srt, .ass, .vtt) or type `S` to skip.")
         return
 
     if state == "WAIT_RENAME_CHOICE":
-        if text == "R": session["state"] = "WAIT_RENAME_VALUE"; await m.reply("Send name")
-        elif text == "S": session["rename"] = session["orig_name"]; await prompt_watermark_or_execute(c, m, user_id, session)
-        else: await m.reply("❌ Invalid! Type `R` to rename or `S` to skip.")
+        if text == "R": 
+            session["state"] = "WAIT_RENAME_VALUE"
+            await m.reply("Send new file name:")
+        elif text == "S": 
+            session["rename"] = session["orig_name"]
+            await prompt_watermark_or_execute(c, m, user_id, session)
+        else: 
+            await m.reply("❌ Invalid! Type `R` to rename or `S` to skip.")
         return
             
     elif state == "WAIT_RENAME_VALUE":
-        if not text: return await m.reply("❌ Please send a valid text name.")
+        if not text: 
+            return await m.reply("❌ Please send a valid text name.")
         raw_name = m.text.strip()
-        if raw_name.lower().endswith(".mp4"): raw_name = raw_name[:-4]
+        if raw_name.lower().endswith(".mp4"): 
+            raw_name = raw_name[:-4]
         session["rename"] = re.sub(r'[^\w\-_]', '_', raw_name) + ".mp4"
         await prompt_watermark_or_execute(c, m, user_id, session)
         return
         
     elif state == "WAIT_WM_CHOICE":
-        if text == "A": session["watermark"] = "yes"
-        elif text == "S": session["watermark"] = "no"
-        else: return await m.reply("❌ Invalid! Type `A` to add watermark or `S` to skip.")
+        if text == "A": 
+            session["watermark"] = "yes"
+        elif text == "S": 
+            session["watermark"] = "no"
+        else: 
+            return await m.reply("❌ Invalid! Type `A` to add watermark or `S` to skip.")
         await execute_dispatch_hardsub(user_id, m)
 
 async def execute_dispatch_hardsub(user_id, msg: Message):
     data = users_data.pop(user_id)
+    
+    is_busy = await is_github_busy()
+    status_text = "⏳ **Task Queued!**\nServer abhi busy hai, aapka task queue me lag gaya hai aur pichle tasks khatam hote hi automatic chalega." if is_busy else "⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*"
+    
+    st = await msg.reply(status_text)
     wm_link = "none"
     wm_pos = "right"
     if data.get("watermark") == "yes":
         wm_link = await get_pinned_file_link(data["chat_id"], "watermark")
         wm_pos = wm_positions.get(data["chat_id"], "right")
 
-    font_link = await get_pinned_file_link(data["chat_id"], "file")
-
-    busy = await is_github_busy()
-    if busy or not task_queue.empty():
-        st = await msg.reply("🕐 **Task Queued!**\nPichla task complete hote hi ye automatically start ho jayega.")
-    else:
-        st = await msg.reply(f"⏳ **Task Dispatched to Server!**\n*Note: Server start hone me 1-2 min lagte hain.*")
-
     payload = {
         "task_type": "hardsub", "video_id": f"https://t.me/c/{str(data['chat_id'])[4:]}/{data['video_msg_id']}",
         "sub_id": data.get("sub_msg_link", "none"), "chat_id": str(data["chat_id"]), "user_id": str(user_id),
         "resolution": "none", "wm_id": wm_link, "wm_pos": wm_pos, "rename": data.get("rename", "none"),
-        "font_link": font_link, "trigger_msg_id": str(st.id)
+        "font_link": await get_pinned_file_link(data["chat_id"], "file"), "trigger_msg_id": str(st.id)
     }
-    await task_queue.put(payload)
+    await trigger_github(payload)
 
 @app.on_callback_query(filters.regex("cancel_active_run"))
 async def cancel_run_callback(c, q: CallbackQuery):
@@ -266,17 +260,24 @@ async def cancel_run_callback(c, q: CallbackQuery):
         if cancelled:
             await q.message.edit("🛑 **Task Cancelled Successfully!**")
             await q.answer("Task Aborted", show_alert=True)
-        else: await q.answer("Active status par koi task nahi mila.", show_alert=True)
-    except Exception as e: await q.answer(f"Abort Exception: {e}", show_alert=True)
+        else: 
+            await q.answer("Active status par koi task nahi mila.", show_alert=True)
+    except Exception as e: 
+        await q.answer(f"Abort Exception: {e}", show_alert=True)
 
 class Health(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Bot Operational")
+    def do_GET(self): 
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot Operational")
 
 async def main():
-    await app.start()
-    print("🚀 Zeabur Controller Bot Started Successfully!")
-    asyncio.create_task(queue_processor())
+    # Start HTTP health check port immediately to keep Render/Zeabur happy
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(), daemon=True).start()
+    print(f"📡 Web server bound to port {PORT}")
+    
+    await app.start()
+    print("🚀 Bot Client Connected Successfully!")
     await idle()
     await app.stop()
 
