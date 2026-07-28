@@ -21,7 +21,12 @@ DESK_CHANNEL_ID = -1003700822969
 app = Client("HarsubBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
 
 users_data = {}
-wm_positions = {} 
+wm_positions = {}
+
+# ---------------- QUEUE SYSTEM ----------------
+# Only one task runs on the server at a time. Anything else gets queued
+# here and is auto-dispatched the moment the running task finishes.
+task_queue = asyncio.Queue()
 
 def is_authorized(m: Message):
     if not m.from_user: return False
@@ -66,6 +71,26 @@ def _send_to_github(task):
 async def trigger_github(task):
     return await asyncio.to_thread(_send_to_github, task)
 
+async def queue_processor():
+    """Background worker: dispatches queued tasks one at a time.
+    Waits for the server to be free, sends the next task, then gives
+    GitHub a moment to register the run before checking again."""
+    while True:
+        payload = await task_queue.get()
+        try:
+            while await is_github_busy():
+                await asyncio.sleep(15)
+            ok, info = await trigger_github(payload)
+            if not ok:
+                print(f"Dispatch Failed: {info}")
+            # buffer so GitHub's API has time to report the run as
+            # queued/in_progress before we check busy status again
+            await asyncio.sleep(25)
+        except Exception as e:
+            print(f"Queue Processor Error: {e}")
+        finally:
+            task_queue.task_done()
+
 async def get_pinned_file_link(chat_id, target_name):
     try:
         chat = await app.get_chat(chat_id)
@@ -109,20 +134,23 @@ async def general_cmds(c, m: Message):
             await m.reply("🗑️ Registry removed.")
         else: await m.reply("❌ Registry not found.")
 
-RES_CMD_MAP = {"1080t": "1080p", "720t": "720p", "480t": "480p"}
+RES_CMD_MAP = {"1080g": "1080p", "720g": "720p", "480g": "480p"}
 
-@app.on_message(filters.command(["1080t", "720t", "480t"]))
+@app.on_message(filters.command(["1080g", "720g", "480g"]))
 async def compress_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
     if not media: return await m.reply("❌ Compression task ke liye kisi valid video/document par reply karein.")
-    
-    if await is_github_busy(): return await m.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai. Ek complete hone dein.")
 
     cmd = RES_CMD_MAP[m.command[0].lower()]
     orig_name = getattr(media, "file_name", "output.mp4")
-    st = await m.reply("⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*")
     font_link = await get_pinned_file_link(m.chat.id, "file")
+
+    busy = await is_github_busy()
+    if busy or not task_queue.empty():
+        st = await m.reply("🕐 **Task Queued!**\nPichla task complete hote hi ye automatically start ho jayega.")
+    else:
+        st = await m.reply("⏳ **Task Dispatched to Server!**\n*Note: Server start hone me 1-2 min lagte hain.*")
 
     payload = {
         "task_type": "compress", "video_id": f"https://t.me/c/{str(m.chat.id)[4:]}/{m.reply_to_message.id}",
@@ -130,15 +158,13 @@ async def compress_cmd(c, m: Message):
         "resolution": cmd, "wm_id": "none", "wm_pos": "none", "rename": orig_name, 
         "font_link": font_link, "trigger_msg_id": str(st.id)
     }
-    await trigger_github(payload)
+    await task_queue.put(payload)
 
-@app.on_message(filters.command("hp"))
+@app.on_message(filters.command("sub"))
 async def hsub_cmd(c, m: Message):
     if not await check_command_privacy(c, m): return
     media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
     if not media: return await m.reply("❌ Hardsub ke liye kisi forwarded video par reply karein.")
-    
-    if await is_github_busy(): return await m.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai. Ek complete hone dein.")
 
     orig_name = getattr(media, "file_name", "output.mp4")
     await m.reply("send file (vtt/srt/ass)")
@@ -197,21 +223,27 @@ async def replies_controller(c, m: Message):
 
 async def execute_dispatch_hardsub(user_id, msg: Message):
     data = users_data.pop(user_id)
-    if await is_github_busy(): return await msg.reply("⏳ **Bot is currently BUSY!**\nPichla task chal raha hai.")
-    st = await msg.reply(f"⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*")
     wm_link = "none"
     wm_pos = "right"
     if data.get("watermark") == "yes":
         wm_link = await get_pinned_file_link(data["chat_id"], "watermark")
         wm_pos = wm_positions.get(data["chat_id"], "right")
 
+    font_link = await get_pinned_file_link(data["chat_id"], "file")
+
+    busy = await is_github_busy()
+    if busy or not task_queue.empty():
+        st = await msg.reply("🕐 **Task Queued!**\nPichla task complete hote hi ye automatically start ho jayega.")
+    else:
+        st = await msg.reply(f"⏳ **Task Dispatched to Server!**\n*Note: Server start hone me 1-2 min lagte hain.*")
+
     payload = {
         "task_type": "hardsub", "video_id": f"https://t.me/c/{str(data['chat_id'])[4:]}/{data['video_msg_id']}",
         "sub_id": data.get("sub_msg_link", "none"), "chat_id": str(data["chat_id"]), "user_id": str(user_id),
         "resolution": "none", "wm_id": wm_link, "wm_pos": wm_pos, "rename": data.get("rename", "none"),
-        "font_link": await get_pinned_file_link(data["chat_id"], "file"), "trigger_msg_id": str(st.id)
+        "font_link": font_link, "trigger_msg_id": str(st.id)
     }
-    await trigger_github(payload)
+    await task_queue.put(payload)
 
 @app.on_callback_query(filters.regex("cancel_active_run"))
 async def cancel_run_callback(c, q: CallbackQuery):
@@ -243,6 +275,7 @@ class Health(BaseHTTPRequestHandler):
 async def main():
     await app.start()
     print("🚀 Zeabur Controller Bot Started Successfully!")
+    asyncio.create_task(queue_processor())
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(), daemon=True).start()
     await idle()
     await app.stop()
