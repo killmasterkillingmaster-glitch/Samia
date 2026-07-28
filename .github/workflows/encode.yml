@@ -101,4 +101,4 @@ jobs:
           FONT_LINK: ${{ github.event.inputs.font_link }}
           TRIGGER_MSG_ID: ${{ github.event.inputs.trigger_msg_id }}
         run: |
-          if [ -f "encorder.py" ]; then python encorder.py; elif [ -f "Samia-main/encorder.py" ]; then python Samia-main/encorder.py; fi
+          if [ -f "encorder.py" ]; then python encorder.py; elif [ -f "Samia-main/studio.py" ]; then python Samia-main/encorder.py; fi
