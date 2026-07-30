@@ -45,11 +45,6 @@ on:
         required: false
         default: 'none'
 
-# Yeh block sequence queue (1-by-1 execution) ensure karta hai
-concurrency:
-  group: video-encoding-queue
-  cancel-in-progress: false
-
 jobs:
   encode_job:
     runs-on: ubuntu-latest
@@ -62,23 +57,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
-
-      # Fast static FFmpeg setup (apt-get se tez start hoga)
-      - name: Install Fast FFmpeg Static Build
-        run: |
-          mkdir -p ffmpeg_bin
-          cd ffmpeg_bin
-          wget -q https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-          tar -xf ffmpeg-release-amd64-static.tar.xz --strip-components=1
-          sudo mv ffmpeg ffprobe /usr/local/bin/
-          cd ..
-          rm -rf ffmpeg_bin
+          cache: 'pip' # Yeh pip cache karega, taaki packages baar baar na install hon
 
       - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Execute Fast Video Encoder
         env:
