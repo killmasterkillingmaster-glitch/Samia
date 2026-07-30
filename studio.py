@@ -157,14 +157,18 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
             timeout=1800
         )
         if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
-    except Exception:
+    except Exception as e:
         try:
             pm_msg = await asyncio.wait_for(
                 app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), 
                 timeout=1800
             )
             if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
-        except: pass
+        except Exception as inner_e: 
+            size_mb = os.path.getsize(file_path)/1048576
+            err_msg = f"❌ **Video Upload Failed!**\nFile is {size_mb:.1f} MB (Check if it exceeds 2000 MB limit)\nError: {inner_e}"
+            await app_instance.send_message(chat_id, err_msg)
+            raise Exception(err_msg)
 
     if file_id:
         try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"🎬 Logs: {caption}\nUser: `{target_user}`")
@@ -175,8 +179,6 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
 async def main():
     global status_msg_id
     
-    # Higher max_concurrent_transmissions = more parallel chunks = faster
-    # download/upload throughput on GitHub Actions' fast network.
     app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=16, no_updates=True)
     await app.start()
 
@@ -283,15 +285,16 @@ async def main():
                             if os.path.exists(ass_out): extracted_subs.append(ass_out)
 
             reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
-            if reso_clean and reso_clean.lower() != "none": scale_filter = f"scale=-2:{reso_clean}"
+            if reso_clean and reso_clean.lower() != "none": scale_filter = f"scale=-2:'min({reso_clean},ih)'"
             else: scale_filter = "scale='trunc(iw/2)*2:trunc(ih/2)*2'"
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
+            # CRF updated to 34 for high compression
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
             ]
             
@@ -327,10 +330,11 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
+            # CRF updated to 34 for hardsub encoding
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             last_edit = time.time()
@@ -363,7 +367,13 @@ async def main():
         except: pass
         
         await update_http_status(f"📤 Sending Video\n{get_send_bar(0)} [0.0%]")
-        await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Process Completed!\n`{out_name}`", prog)
+        
+        upload_success = False
+        try:
+            await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Process Completed!\n`{out_name}`", prog)
+            upload_success = True
+        except Exception as upload_e:
+            await update_http_status(f"❌ **Upload Error:**\n<code>{html.escape(str(upload_e))}</code>")
 
         if TASK_TYPE == "compress" and extracted_subs:
             for sub_f in extracted_subs:
@@ -371,6 +381,9 @@ async def main():
                 except:
                     try: await app_up.send_document(chat_id=CHAT_ID, document=sub_f, caption="📄 Extracted Clean Subtitles (.ass)")
                     except: pass
+
+        if not upload_success:
+            raise Exception("Video failed to upload (Network timeout or size > 2.0GB)")
 
         try: await app_up.delete_messages(CHAT_ID, status_msg_id)
         except: pass
