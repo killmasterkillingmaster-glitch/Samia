@@ -10,6 +10,8 @@ pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+STRING_SESSION = os.getenv("STRING_SESSION", "")
+
 TASK_TYPE = os.getenv("TASK_TYPE")
 VIDEO_ID = os.getenv("VIDEO_ID")
 SUB_ID = os.getenv("SUB_ID")
@@ -65,27 +67,94 @@ def _sync_http_edit(text):
 async def update_http_status(text):
     await asyncio.to_thread(_sync_http_edit, text)
 
-async def prog(c, t, app_instance, step_name):
-    global last_time, start_time, status_msg_id
+# ═══════════════════════════════════════════════════
+# FAST SPEED MONITOR & AUTO-RECONNECT
+# ═══════════════════════════════════════════════════
+async def prog(current, total, app_instance, step_name):
+    global last_time, start_time
     now = time.time()
     if start_time == 0:
         start_time = now
         last_time = now
         return
-        
-    if now - last_time > 12 or c == t:
+
+    if not hasattr(app_instance, 'monitor_last_time'):
+        app_instance.monitor_last_time = now
+        app_instance.monitor_last_current = current
+        app_instance.slow_count = 0
+
+    elapsed_monitor = now - app_instance.monitor_last_time
+    if elapsed_monitor >= 5.0 and current < total:
+        inst_speed = (current - app_instance.monitor_last_current) / elapsed_monitor
+        if inst_speed < 524288:  # Below 512 KB/s
+            app_instance.slow_count += 1
+        else:
+            app_instance.slow_count = 0
+        app_instance.monitor_last_time = now
+        app_instance.monitor_last_current = current
+
+        if app_instance.slow_count >= 4:  # 20s slow speed -> auto reconnect
+            app_instance.force_restart = True
+            try: app_instance.stop_transmission()
+            except: pass
+            return
+
+    if now - last_time > 10 or current == total:
         elapsed = now - start_time
-        speed = c / elapsed if elapsed > 0 else 0
-        speed_mb = (speed / 1024) / 1024
-        percent = (c / t) * 100 if t > 0 else 0
+        speed_mb = (current / elapsed / 1024 / 1024) if elapsed > 0 else 0
+        percent = (current / total) * 100 if total > 0 else 0
         
         if step_name in ["hardsub_download", "compress_download"]:
-            text = f"📥 **Downloading Video**\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📥 **Downloading Video**\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {current/1048576:.1f}MB / {total/1048576:.1f}MB"
         else:
-            text = f"📤 **Sending Video**\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
+            text = f"📤 **Sending Video**\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {current/1048576:.1f}MB / {total/1048576:.1f}MB"
         
         asyncio.create_task(update_http_status(text))
         last_time = now
+
+async def robust_download(app_instance, msg, output_path, step_name):
+    max_retries = 15
+    for attempt in range(max_retries):
+        try:
+            app_instance.force_restart = False
+            reset_prog()
+            
+            dl_path = await app_instance.download_media(
+                msg, 
+                file_name=output_path, 
+                progress=prog, 
+                progress_args=(app_instance, step_name)
+            )
+            
+            # Validation: Check if file exists and is valid (>10KB)
+            if dl_path and os.path.exists(dl_path) and os.path.getsize(dl_path) > 10240:
+                return dl_path
+            else:
+                raise Exception("Corrupt or incomplete file downloaded.")
+                
+        except Exception as e:
+            if getattr(app_instance, 'force_restart', False) or attempt < max_retries - 1:
+                print(f"Network drop or slow speed: {e}. Retrying ({attempt+1}/{max_retries})...")
+                if os.path.exists(output_path):
+                    try: os.remove(output_path)
+                    except: pass
+                await asyncio.sleep(3)
+                continue
+            else:
+                raise Exception(f"Download failed after {max_retries} attempts.")
+
+async def download_tg_link(app_instance, link, output_path, step_name):
+    if not link or link == "none": return None
+    try:
+        msg_id = int(link.split("/")[-1])
+        msg = await app_instance.get_messages(CHAT_ID, msg_id)
+        if not msg or not (msg.document or msg.video or msg.photo or msg.animation):
+            raise Exception("Message ya media nahi mila!")
+        
+        return await robust_download(app_instance, msg, output_path, step_name)
+    except Exception as e:
+        print(f"Download Error: {e}")
+        raise e
 
 def convert_to_clean_ass(input_sub, output_ass):
     try:
@@ -120,24 +189,6 @@ def get_video_dimensions_and_duration(video_path):
         if res_dur.stdout.strip(): duration = float(res_dur.stdout.strip())
     except: pass
     return 1280, 720, duration
-
-async def download_tg_link(app_instance, link, output_path, step_name):
-    if not link or link == "none": return None
-    try:
-        msg_id = int(link.split("/")[-1])
-        msg = await app_instance.get_messages(CHAT_ID, msg_id)
-        if msg and (msg.document or msg.video or msg.photo or msg.animation):
-            ext = ""
-            if msg.document and msg.document.file_name: _, ext = os.path.splitext(msg.document.file_name)
-            elif msg.video and msg.video.file_name: _, ext = os.path.splitext(msg.video.file_name)
-            if ext and not output_path.endswith(ext.lower()): output_path = output_path + ext.lower()
-            reset_prog()
-            return await asyncio.wait_for(
-                msg.download(file_name=output_path, progress=prog, progress_args=(app_instance, step_name)), 
-                timeout=1800
-            )
-    except Exception as e: print(f"Download Error: {e}")
-    return None
 
 async def deliver_video_asset(app_instance, chat_id, target_user, file_path, caption, progress_callback):
     if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
@@ -179,7 +230,13 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
 async def main():
     global status_msg_id
     
-    app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=16, no_updates=True)
+    if STRING_SESSION:
+        app = Client("worker_fast", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True)
+        print("🚀 Using STRING_SESSION for Maximum Speed!")
+    else:
+        app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+        print("⚠️ Using BOT_TOKEN for Worker.")
+
     await app.start()
 
     try: await app.get_chat(CHAT_ID)
@@ -257,7 +314,7 @@ async def main():
 
         await app.stop()
 
-        # ---------------- ENCODE PHASE ----------------
+        # ---------------- ENCODE PHASE (3x FAST) ----------------
         process_title = "Compressing" if TASK_TYPE == "compress" else "Encoding Hardsub"
 
         if TASK_TYPE == "compress":
@@ -290,12 +347,12 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # CRF updated to 34 for high compression
+            # Optimized to ultrafast & audio copy for 3x speed
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:a", "copy", "-movflags", "+faststart", out_name
             ]
             
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -330,11 +387,10 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
-            # CRF updated to 34 for hardsub encoding
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "copy", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "copy", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             last_edit = time.time()
@@ -361,7 +417,11 @@ async def main():
             if process.returncode != 0: raise Exception("FFmpeg hardsub encoding failed.\n" + "\n".join(log_tail[-8:]))
 
         # ---------------- UPLOAD PHASE ----------------
-        app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=16, no_updates=True)
+        if STRING_SESSION:
+            app_up = Client("worker_fast_up", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION, in_memory=True)
+        else:
+            app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+
         await app_up.start()
         try: await app_up.get_chat(CHAT_ID)
         except: pass
@@ -392,6 +452,15 @@ async def main():
     except Exception as e:
         try: _sync_http_edit(f"❌ **Workflow Error:**\n<code>{html.escape(str(e))}</code>")
         except: pass
+    finally:
+        # Cleanup temporary files
+        for temp_f in ["video.mkv", "sub_raw", "watermark.png", "ready_sub.ass", "thumb.jpg"]:
+            if os.path.exists(temp_f):
+                try: os.remove(temp_f)
+                except: pass
+        if os.path.exists("fonts/custom_font.ttf"):
+            try: os.remove("fonts/custom_font.ttf")
+            except: pass
 
 if __name__ == "__main__":
     asyncio.run(main())
