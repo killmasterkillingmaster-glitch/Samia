@@ -1,306 +1,399 @@
-import os, re, time, asyncio, threading, requests, psutil
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.enums import ChatType
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import os, sys, time, asyncio, re, subprocess, requests, html, shutil
+import pyrogram.utils, pysubs2
+from pyrogram import Client
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.enums import ParseMode
+from fontTools.ttLib import TTFont
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "").strip()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-REPO_NAME = os.getenv("REPO_NAME", "").strip()  
+pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") else "chat" if str(p).startswith("-") else "user"
 
-PORT = int(os.getenv("PORT", 8080))
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+TASK_TYPE = os.getenv("TASK_TYPE")
+VIDEO_ID = os.getenv("VIDEO_ID")
+SUB_ID = os.getenv("SUB_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))
+USER_ID = int(os.getenv("USER_ID"))
+RESOLUTION = os.getenv("RESOLUTION")
+WM_ID = os.getenv("WM_ID")
+WM_POS = os.getenv("WM_POS")
+RENAME = os.getenv("RENAME")
+FONT_LINK = os.getenv("FONT_LINK")
+TRIGGER_MSG_ID = os.getenv("TRIGGER_MSG_ID")
 
-OWNER_ID = 5344078567
-ALLOWED_USER = 5351848105
-GROUP_ID = -1003899919015
 DESK_CHANNEL_ID = -1003700822969
 
-app = Client("HarsubBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
+last_time = 0
+start_time = 0
+status_msg_id = None
+os.makedirs("fonts", exist_ok=True)
 
-users_data = {}
-wm_positions = {} 
+def reset_prog():
+    global last_time, start_time
+    last_time = time.time()
+    start_time = time.time()
 
-def is_authorized(m: Message):
-    if not m.from_user: return False
-    u_id = m.from_user.id
-    if u_id in [OWNER_ID, ALLOWED_USER]: return True
-    if m.chat and m.chat.id == GROUP_ID: return True
-    return False
+def get_download_bar(percent):
+    filled = int(percent / 100 * 20)
+    return f"[{'>' * filled}{'-' * (20 - filled)}]"
 
-async def check_command_privacy(c, m: Message):
-    is_pm = m.chat.type == ChatType.PRIVATE
-    if is_pm and m.from_user.id in [OWNER_ID, ALLOWED_USER]: return True
-    if is_pm:
-        try: 
-            chat_info = await c.get_chat(GROUP_ID)
-            invite_link = chat_info.invite_link or "https://t.me/Mangajii"
-        except: 
-            invite_link = "https://t.me/Mangajii"
-        await m.reply(f"❌ **Aap is Bot ko Private mein use nahi kar sakte!**\n\n👉 Humara [Official Group]({invite_link}) join karein.", disable_web_page_preview=True)
-        return False
-    return is_authorized(m)
+def get_process_bar(percent):
+    filled = int(percent / 100 * 20)
+    seq = ["•", "°", ":", "°", "•", ":"]
+    bar = "".join(seq[i % len(seq)] for i in range(filled))
+    return f"[{bar}{'-' * (20 - filled)}]"
 
-# Allows 2 Concurrent Tasks at a time
-async def is_github_busy():
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    url_in_progress = f"https://api.github.com/repos/{REPO_NAME}/actions/runs?status=in_progress"
-    url_queued = f"https://api.github.com/repos/{REPO_NAME}/actions/runs?status=queued"
-    try:
-        r_in = await asyncio.to_thread(requests.get, url_in_progress, headers=headers)
-        r_qu = await asyncio.to_thread(requests.get, url_queued, headers=headers)
-        if r_in.status_code == 200 and r_qu.status_code == 200:
-            count = r_in.json().get("total_count", 0) + r_qu.json().get("total_count", 0)
-            return count >= 2  # Busy only if 2 or more active runs
-    except Exception as e:
-        print(f"GH API Error: {e}")
-    return False
+def get_send_bar(percent):
+    filled = int(percent / 100 * 20)
+    return f"[{'▓' * filled}{'▒' * (20 - filled)}]"
 
-def _send_to_github(task):
-    url = f"https://api.github.com/repos/{REPO_NAME}/actions/workflows/encode.yml/dispatches"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-    payload = {"ref": "main", "inputs": task}
-    try:
-        r = requests.post(url, headers=headers, json=payload)
-        return (True, "Success") if r.status_code == 204 else (False, f"Code {r.status_code}: {r.text}")
-    except Exception as e: 
-        return False, str(e)
+def _sync_http_edit(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": CHAT_ID, 
+        "message_id": status_msg_id, 
+        "text": text, 
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [[{"text": "🛑 Cancel Task", "callback_data": "cancel_active_run"}]]
+        }
+    }
+    try: requests.post(url, json=payload, timeout=5)
+    except: pass
 
-async def trigger_github(task):
-    return await asyncio.to_thread(_send_to_github, task)
+async def update_http_status(text):
+    await asyncio.to_thread(_sync_http_edit, text)
 
-async def get_pinned_file_link(chat_id, target_name):
-    try:
-        chat = await app.get_chat(chat_id)
-        if chat.pinned_message and chat.pinned_message.text and f"Name – {target_name}" in chat.pinned_message.text:
-            match = re.search(r"Link – (https://\S+)", chat.pinned_message.text)
-            if match: return match.group(1)
-        async for msg in app.get_chat_history(chat_id, limit=50):
-            if msg.text and f"Name – {target_name}" in msg.text:
-                match = re.search(r"Link – (https://\S+)", msg.text)
-                if match: return match.group(1)
-    except: 
-        pass
-    return "none"
-
-@app.on_message(filters.command(["start", "help", "cancel", "stats", "addposition", "admark", "deletmark", "addfont", "removefont"]))
-async def general_cmds(c, m: Message):
-    cmd = m.command[0]
-    if cmd == "start" and m.chat.type == ChatType.PRIVATE:
-        if m.from_user.id in [OWNER_ID, ALLOWED_USER]: 
-            return await m.reply("🙋‍♂️ Welcome Owner!")
-        return await check_command_privacy(c, m)
-    if not await check_command_privacy(c, m): return
-
-    if cmd == "help":
-        help_text = (
-            "🤖 **Bot Usage Guide:**\n\n"
-            "1️⃣ **Compress Video:** Video par reply karein `/1080g`, `/720g`, ya `/480g`\n"
-            "2️⃣ **Hardsub Video:** Video par reply karein `/sub` aur subtitle send karein.\n"
-            "3️⃣ **Set Watermark Position:** `/addposition left` ya `/addposition right`\n"
-            "4️⃣ **Cancel Setup State:** `/cancel` type karein agar galat command chal gayi ho."
-        )
-        await m.reply(help_text)
-
-    elif cmd == "cancel":
-        if m.from_user.id in users_data:
-            users_data.pop(m.from_user.id)
-            await m.reply("✅ Aapka active setup (Sub/Rename) cancel aur clear kar diya gaya hai.")
+async def prog(c, t, app_instance, step_name):
+    global last_time, start_time, status_msg_id
+    now = time.time()
+    if start_time == 0:
+        start_time = now
+        last_time = now
+        return
+        
+    if now - last_time > 12 or c == t:
+        elapsed = now - start_time
+        speed = c / elapsed if elapsed > 0 else 0
+        speed_mb = (speed / 1024) / 1024
+        percent = (c / t) * 100 if t > 0 else 0
+        
+        if step_name in ["hardsub_download", "compress_download"]:
+            text = f"📥 **Downloading Video**\n{get_download_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         else:
-            await m.reply("❌ Aapka koi active setup process nahi chal raha tha.")
-
-    elif cmd == "stats":
-        ram = psutil.virtual_memory()
-        cpu = psutil.cpu_percent()
-        await m.reply(f"📊 **Bot diagnostics:**\n🖥️ CPU: `{cpu}%`\n💾 RAM: `{ram.percent}%`")
-
-    elif cmd == "addposition":
-        if len(m.command) < 2 or m.command[1].lower() not in ["left", "right"]: 
-            return await m.reply("❌ Usage: /addposition left|right")
-        wm_positions[m.chat.id] = m.command[1].lower()
-        await m.reply(f"✅ Watermark position updated: **{m.command[1].upper()}**")
-
-    elif cmd in ["admark", "addfont"]:
-        if not m.reply_to_message or not (m.reply_to_message.photo or m.reply_to_message.document): 
-            return await m.reply("❌ Reply to a file.")
-        msg_link = f"https://t.me/c/{str(m.chat.id)[4:]}/{m.reply_to_message.id}"
-        t_name = "watermark" if cmd == "admark" else "file"
-        pinned = await m.reply(f"ID – {m.from_user.id}\nLink – {msg_link}\nName – {t_name}")
-        await pinned.pin()
-        await m.reply(f"✅ Configuration saved.")
-
-    elif cmd in ["deletmark", "removefont"]:
-        chat = await c.get_chat(m.chat.id)
-        t_name = "watermark" if cmd == "deletmark" else "file"
-        if chat.pinned_message and f"Name – {t_name}" in chat.pinned_message.text:
-            await chat.pinned_message.unpin()
-            await m.reply("🗑️ Registry removed.")
-        else: 
-            await m.reply("❌ Registry not found.")
-
-RES_CMD_MAP = {"1080g": "1080p", "720g": "720p", "480g": "480p"}
-
-@app.on_message(filters.command(["1080g", "720g", "480g"]))
-async def compress_cmd(c, m: Message):
-    if not await check_command_privacy(c, m): return
-    media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
-    if not media: 
-        return await m.reply("❌ Compression task ke liye kisi valid video/document par reply karein.")
-    
-    cmd = RES_CMD_MAP[m.command[0].lower()]
-    orig_name = getattr(media, "file_name", "output.mp4")
-    
-    is_busy = await is_github_busy()
-    status_text = "⏳ **Task Queued!**\n2 Servers busy hain, aapka task queue me lag gaya hai aur pichle tasks khatam hote hi automatic chalega." if is_busy else "⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*"
-    
-    st = await m.reply(status_text)
-    font_link = await get_pinned_file_link(m.chat.id, "file")
-
-    payload = {
-        "task_type": "compress", "video_id": f"https://t.me/c/{str(m.chat.id)[4:]}/{m.reply_to_message.id}",
-        "sub_id": "none", "chat_id": str(m.chat.id), "user_id": str(m.from_user.id),
-        "resolution": cmd, "wm_id": "none", "wm_pos": "none", "rename": orig_name, 
-        "font_link": font_link, "trigger_msg_id": str(st.id)
-    }
-    await trigger_github(payload)
-
-@app.on_message(filters.command("sub"))
-async def hsub_cmd(c, m: Message):
-    if not await check_command_privacy(c, m): return
-    media = m.reply_to_message.video or m.reply_to_message.document or m.reply_to_message.animation if m.reply_to_message else None
-    if not media: 
-        return await m.reply("❌ Hardsub ke liye kisi forwarded video par reply karein.")
-
-    orig_name = getattr(media, "file_name", "output.mp4")
-    await m.reply("Send subtitle file (vtt/srt/ass) or type `S` to skip.")
-    users_data[m.from_user.id] = {"video_msg_id": m.reply_to_message.id, "chat_id": m.chat.id, "state": "WAIT_SUB", "rename": "none", "orig_name": orig_name}
-
-async def prompt_watermark_or_execute(c, m, user_id, session):
-    wm_link = await get_pinned_file_link(session["chat_id"], "watermark")
-    if wm_link != "none":
-        session["state"] = "WAIT_WM_CHOICE"
-        await m.reply("Add watermark? Type `A` for Add or `S` to skip.")
-    else:
-        session["watermark"] = "no"
-        await execute_dispatch_hardsub(user_id, m)
-
-@app.on_message(filters.text | filters.document)
-async def replies_controller(c, m: Message):
-    if not m.from_user or (m.text and m.text.startswith("/")): return
-    user_id = m.from_user.id
-    if user_id not in users_data: return
-    session = users_data[user_id]
-    if session["chat_id"] != m.chat.id: return
-    
-    state, text = session.get("state"), m.text.strip().upper() if m.text else ""
-    
-    if state == "WAIT_SUB":
-        if m.document and m.document.file_name and m.document.file_name.lower().endswith(('.srt', '.ass', '.vtt', '.txt')):
-            session["sub_msg_link"] = f"https://t.me/c/{str(m.chat.id)[4:]}/{m.id}"
-            session["state"] = "WAIT_RENAME_CHOICE"
-            await m.reply("Rename type `R` / Same name type `S`")
-        elif text == "S":
-            session["sub_msg_link"] = "none"
-            session["state"] = "WAIT_RENAME_CHOICE"
-            await m.reply("Rename type `R` / Same name type `S`")
-        else: 
-            await m.reply("❌ Invalid format! Please send a valid subtitle file (.srt, .ass, .vtt) or type `S` to skip.")
-        return
-
-    if state == "WAIT_RENAME_CHOICE":
-        if text == "R": 
-            session["state"] = "WAIT_RENAME_VALUE"
-            await m.reply("Send new file name:")
-        elif text == "S": 
-            session["rename"] = session["orig_name"]
-            await prompt_watermark_or_execute(c, m, user_id, session)
-        else: 
-            await m.reply("❌ Invalid! Type `R` to rename or `S` to skip.")
-        return
-            
-    elif state == "WAIT_RENAME_VALUE":
-        if not text: 
-            return await m.reply("❌ Please send a valid text name.")
-        raw_name = m.text.strip()
-        if raw_name.lower().endswith(".mp4"): 
-            raw_name = raw_name[:-4]
-        # Preserves spaces cleanly while removing invalid system characters
-        clean_name = re.sub(r'[\\/:*?"<>|]', '', raw_name).strip()
-        session["rename"] = clean_name + ".mp4"
-        await prompt_watermark_or_execute(c, m, user_id, session)
-        return
+            text = f"📤 **Sending Video**\n{get_send_bar(percent)} [{percent:.1f}%]\n🚀 Speed: **{speed_mb:.2f} MB/s**\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
         
-    elif state == "WAIT_WM_CHOICE":
-        if text == "A": 
-            session["watermark"] = "yes"
-        elif text == "S": 
-            session["watermark"] = "no"
-        else: 
-            return await m.reply("❌ Invalid! Type `A` to add watermark or `S` to skip.")
-        await execute_dispatch_hardsub(user_id, m)
+        asyncio.create_task(update_http_status(text))
+        last_time = now
 
-async def execute_dispatch_hardsub(user_id, msg: Message):
-    data = users_data.pop(user_id)
-    
-    is_busy = await is_github_busy()
-    status_text = "⏳ **Task Queued!**\n2 Servers busy hain, aapka task queue me lag gaya hai aur pichle tasks khatam hote hi automatic chalega." if is_busy else "⏳ **Task Dispatched to Server!**\n*Note: GitHub server start hone me 1-2 min lagte hain.*"
-    
-    st = await msg.reply(status_text)
-    wm_link = "none"
-    wm_pos = "right"
-    if data.get("watermark") == "yes":
-        wm_link = await get_pinned_file_link(data["chat_id"], "watermark")
-        wm_pos = wm_positions.get(data["chat_id"], "right")
-
-    payload = {
-        "task_type": "hardsub", "video_id": f"https://t.me/c/{str(data['chat_id'])[4:]}/{data['video_msg_id']}",
-        "sub_id": data.get("sub_msg_link", "none"), "chat_id": str(data["chat_id"]), "user_id": str(user_id),
-        "resolution": "none", "wm_id": wm_link, "wm_pos": wm_pos, "rename": data.get("rename", "none"),
-        "font_link": await get_pinned_file_link(data["chat_id"], "file"), "trigger_msg_id": str(st.id)
-    }
-    await trigger_github(payload)
-
-@app.on_callback_query(filters.regex("cancel_active_run"))
-async def cancel_run_callback(c, q: CallbackQuery):
-    if q.from_user.id not in [OWNER_ID, ALLOWED_USER]:
-        return await q.answer("❌ You are not authorized to cancel this task.", show_alert=True)
-
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+def convert_to_clean_ass(input_sub, output_ass):
     try:
-        cancelled = False
-        for status in ["in_progress", "queued"]:
-            url = f"https://api.github.com/repos/{REPO_NAME}/actions/runs?status={status}"
-            r = await asyncio.to_thread(requests.get, url, headers=headers)
-            if r.status_code == 200:
-                runs = r.json().get("workflow_runs", [])
-                for run in runs:
-                    cancel_url = f"https://api.github.com/repos/{REPO_NAME}/actions/runs/{run.get('id')}/cancel"
-                    await asyncio.to_thread(requests.post, cancel_url, headers=headers)
-                    cancelled = True
-        
-        if cancelled:
-            await q.message.edit("🛑 **Task Cancelled Successfully!**")
-            await q.answer("Task Aborted", show_alert=True)
-        else: 
-            await q.answer("Active status par koi task nahi mila.", show_alert=True)
-    except Exception as e: 
-        await q.answer(f"Abort Exception: {e}", show_alert=True)
+        subs = pysubs2.load(input_sub)
+        subs.styles["Default"] = pysubs2.SSAStyle(fontname="Arial", fontsize=24, primarycolor=pysubs2.Color(255, 255, 255), outlinecolor=pysubs2.Color(0, 0, 0), outline=2, shadow=1, marginl=20, marginr=20, marginv=15)
+        for line in subs:
+            line.style = "Default"
+            line.text = re.sub(r'<[^>]+>', '', re.sub(r'\{[^}]+\}', '', line.text)).replace('\r', '').replace('\n', '\\N').strip()
+        subs.save(output_ass)
+    except Exception as e: pass
 
-class Health(BaseHTTPRequestHandler):
-    def do_GET(self): 
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot Operational")
+def is_ass_format(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(4000)
+        return bool(re.search(r'\[Script Info\]|\[V4\+?\s*Styles\]|\[Events\]', head, re.IGNORECASE))
+    except Exception: return False
+
+def get_font_name(font_path):
+    try:
+        font = TTFont(font_path)
+        for record in font['name'].names:
+            if record.nameID == 4: return record.toUnicode()
+    except: pass
+    return "Arial"
+
+def get_video_dimensions_and_duration(video_path):
+    cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+    duration = 0.0
+    try:
+        res_dur = subprocess.run(cmd_dur, capture_output=True, text=True, timeout=10)
+        if res_dur.stdout.strip(): duration = float(res_dur.stdout.strip())
+    except: pass
+    return 1280, 720, duration
+
+async def download_tg_link(app_instance, link, output_path, step_name):
+    if not link or link == "none": return None
+    try:
+        msg_id = int(link.split("/")[-1])
+        msg = await app_instance.get_messages(CHAT_ID, msg_id)
+        if msg and (msg.document or msg.video or msg.photo or msg.animation):
+            ext = ""
+            if msg.document and msg.document.file_name: _, ext = os.path.splitext(msg.document.file_name)
+            elif msg.video and msg.video.file_name: _, ext = os.path.splitext(msg.video.file_name)
+            if ext and not output_path.endswith(ext.lower()): output_path = output_path + ext.lower()
+            reset_prog()
+            return await asyncio.wait_for(
+                msg.download(file_name=output_path, progress=prog, progress_args=(app_instance, step_name)), 
+                timeout=1800
+            )
+    except Exception as e: print(f"Download Error: {e}")
+    return None
+
+async def deliver_video_asset(app_instance, chat_id, target_user, file_path, caption, progress_callback):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
+        raise Exception("Processed video missing or empty!")
+    
+    thumb_path = "thumb.jpg"
+    try: subprocess.run(["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-vframes", "1", thumb_path], capture_output=True, timeout=15)
+    except: pass
+    if not os.path.exists(thumb_path): thumb_path = None
+
+    pm_msg, file_id = None, None
+    reset_prog()
+
+    try:
+        pm_msg = await asyncio.wait_for(
+            app_instance.send_document(chat_id=target_user, document=file_path, caption=caption, thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), 
+            timeout=1800
+        )
+        if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+    except Exception as e:
+        try:
+            pm_msg = await asyncio.wait_for(
+                app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), 
+                timeout=1800
+            )
+            if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+        except Exception as inner_e: 
+            size_mb = os.path.getsize(file_path)/1048576
+            err_msg = f"❌ **Video Upload Failed!**\nFile is {size_mb:.1f} MB (Check if it exceeds 2000 MB limit)\nError: {inner_e}"
+            await app_instance.send_message(chat_id, err_msg)
+            raise Exception(err_msg)
+
+    if file_id:
+        try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"🎬 Logs: {caption}\nUser: `{target_user}`")
+        except: pass
+
+    return pm_msg
 
 async def main():
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), Health).serve_forever(), daemon=True).start()
-    print(f"📡 Web server bound to port {PORT}")
+    global status_msg_id
     
+    app = Client("worker_down", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=16, no_updates=True)
     await app.start()
-    print("🚀 Bot Client Connected Successfully!")
-    await idle()
-    await app.stop()
+
+    try: await app.get_chat(CHAT_ID)
+    except: pass
+
+    if TRIGGER_MSG_ID and TRIGGER_MSG_ID != "none":
+        try: await app.delete_messages(CHAT_ID, int(TRIGGER_MSG_ID))
+        except: pass
+
+    init_msg = await app.send_message(
+        CHAT_ID, 
+        "⚙️ Worker initialized. Downloading video...",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Cancel Task", callback_data="cancel_active_run")]])
+    )
+    status_msg_id = init_msg.id
+
+    try:
+        step_dl = "hardsub_download" if TASK_TYPE == "hardsub" else "compress_download"
+        video_file = await download_tg_link(app, VIDEO_ID, "video.mkv", step_dl)
+        if not video_file: raise Exception("Telegram video download failed.")
+
+        _, _, duration = get_video_dimensions_and_duration(video_file)
+
+        base_name = "output"
+        if RENAME and RENAME != "none":
+            base_name = RENAME.rsplit('.', 1)[0]
+        out_name = f"{base_name}.mp4"
+
+        font_name = "Arial"
+        if FONT_LINK and FONT_LINK != "none":
+            r = requests.get(FONT_LINK)
+            if r.status_code == 200:
+                with open("fonts/custom_font.ttf", "wb") as f: f.write(r.content)
+                font_name = get_font_name("fonts/custom_font.ttf")
+                
+        sub_file, wm_file, has_watermark = None, None, False
+        extracted_subs = [] 
+        
+        if TASK_TYPE == "hardsub":
+            if SUB_ID and SUB_ID != "none":
+                sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "hardsub_download")
+            if not sub_file or not os.path.exists(sub_file): raise Exception("Subtitle download failed or missing.")
+
+            if sub_file.lower().endswith('.ass') or is_ass_format(sub_file):
+                try:
+                    with open(sub_file, 'r', encoding='utf-8', errors='ignore') as f: ass_content = f.read()
+                except Exception:
+                    with open(sub_file, 'r', encoding='latin-1', errors='ignore') as f: ass_content = f.read()
+
+                if any(word in ass_content.lower() for word in ["logo", "watermark", "cr", "credit"]): has_watermark = True
+
+                if FONT_LINK and FONT_LINK != "none":
+                    lines = ass_content.splitlines()
+                    new_lines = []
+                    for line in lines:
+                        if line.strip().startswith("Style:"):
+                            parts = line.split(",", 2)
+                            if len(parts) >= 3: line = f"{parts[0]},{font_name},{parts[2]}"
+                        new_lines.append(line)
+                    with open("ready_sub.ass", "w", encoding="utf-8") as f: f.write("\n".join(new_lines))
+                else:
+                    shutil.copy(sub_file, "ready_sub.ass")
+            else:
+                try: subs = pysubs2.load(sub_file, encoding="utf-8")
+                except: subs = pysubs2.load(sub_file, encoding="latin-1")
+                new_subs = pysubs2.SSAFile()
+                new_subs.styles["Default"] = pysubs2.SSAStyle(fontname=font_name, fontsize=24, primarycolor=pysubs2.Color(255, 255, 255), outlinecolor=pysubs2.Color(0, 0, 0), outline=2, shadow=1, marginl=20, marginr=20, marginv=15)
+                for line in subs:
+                    clean_text = re.sub(r'<[^>]+>', '', re.sub(r'\{[^}]+\}', '', line.text)).replace('\r', '').replace('\n', '\\N').strip()
+                    if clean_text: new_subs.append(pysubs2.SSAEvent(start=line.start, end=line.end, text=clean_text, style="Default"))
+                new_subs.save("ready_sub.ass")
+
+            if WM_ID and WM_ID != "none" and not has_watermark:
+                wm_file = await download_tg_link(app, WM_ID, "watermark.png", "hardsub_download")
+
+        await app.stop()
+
+        # ---------------- ENCODE PHASE ----------------
+        process_title = "Compressing" if TASK_TYPE == "compress" else "Encoding Hardsub"
+
+        if TASK_TYPE == "compress":
+            await update_http_status(f"⚙️ Checking and Extracting Subtitles...")
+            cmd_probe = ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index,codec_name", "-of", "csv=p=0", video_file]
+            res_probe = subprocess.run(cmd_probe, capture_output=True, text=True)
+            if res_probe.stdout.strip():
+                streams = res_probe.stdout.strip().split('\n')
+                for i, st in enumerate(streams):
+                    if not st: continue
+                    parts = st.split(',')
+                    s_idx = parts[0]
+                    s_codec = parts[1].strip()
+                    if s_codec in ['ass', 'ssa']:
+                        ass_out = f"{base_name}_track_{i+1}.ass"
+                        subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", f"0:{s_idx}", ass_out])
+                        if os.path.exists(ass_out) and os.path.getsize(ass_out) > 0: extracted_subs.append(ass_out)
+                    elif s_codec in ['subrip', 'srt', 'webvtt']:
+                        temp_ext = ".srt" if s_codec == 'subrip' else ".vtt"
+                        temp_sub = f"temp_{i+1}{temp_ext}"
+                        subprocess.run(["ffmpeg", "-y", "-i", video_file, "-map", f"0:{s_idx}", temp_sub])
+                        if os.path.exists(temp_sub) and os.path.getsize(temp_sub) > 0:
+                            ass_out = f"{base_name}_track_{i+1}.ass"
+                            convert_to_clean_ass(temp_sub, ass_out)
+                            if os.path.exists(ass_out): extracted_subs.append(ass_out)
+
+            reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
+            # ---- FIX: removed single quotes around min() ----
+            if reso_clean and reso_clean.lower() != "none":
+                scale_filter = f"scale=-2:min({reso_clean},ih)"
+            else:
+                scale_filter = "scale='trunc(iw/2)*2:trunc(ih/2)*2'"
+
+            await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
+            
+            # CRF 34 for high compression
+            cmd = [
+                "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
+                "-map", "0:v", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
+            ]
+            
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            last_edit = time.time()
+            log_tail = []
+            async def read_stdout():
+                nonlocal last_edit
+                while True:
+                    line = await process.stdout.readline()
+                    if not line: break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str and "out_time_us=" not in line_str and "frame=" not in line_str:
+                        log_tail.append(line_str)
+                        if len(log_tail) > 20: log_tail.pop(0)
+                    if "out_time_us=" in line_str:
+                        now = time.time()
+                        if now - last_edit > 10:
+                            try:
+                                percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
+                                asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
+                            except: pass
+                            last_edit = now
+            await read_stdout()
+            await process.wait()
+            if process.returncode != 0: raise Exception("FFmpeg compression failed.\n" + "\n".join(log_tail[-8:]))
+
+        elif TASK_TYPE == "hardsub":
+            vf_filter = "subtitles='ready_sub.ass':charenc=UTF-8"
+            if FONT_LINK and FONT_LINK != "none": vf_filter += ":fontsdir=fonts"
+            v_filter = f"scale='trunc(iw/2)*2:trunc(ih/2)*2',{vf_filter}"
+            overlay_coord = "W-w-15:15" if WM_POS == "right" else "15:15"
+
+            await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
+
+            if wm_file and os.path.exists(wm_file):
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+            else:
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            last_edit = time.time()
+            log_tail = []
+            async def read_stdout():
+                nonlocal last_edit
+                while True:
+                    line = await process.stdout.readline()
+                    if not line: break
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str and "out_time_us=" not in line_str and "frame=" not in line_str:
+                        log_tail.append(line_str)
+                        if len(log_tail) > 20: log_tail.pop(0)
+                    if "out_time_us=" in line_str:
+                        now = time.time()
+                        if now - last_edit > 10:
+                            try:
+                                percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
+                                asyncio.create_task(update_http_status(f"⚙️ {process_title}\n{get_process_bar(percent)} [{percent:.1f}%]"))
+                            except: pass
+                            last_edit = now
+            await read_stdout()
+            await process.wait()
+            if process.returncode != 0: raise Exception("FFmpeg hardsub encoding failed.\n" + "\n".join(log_tail[-8:]))
+
+        # ---------------- UPLOAD PHASE ----------------
+        app_up = Client("worker_up", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=32, max_concurrent_transmissions=16, no_updates=True)
+        await app_up.start()
+        try: await app_up.get_chat(CHAT_ID)
+        except: pass
+        
+        await update_http_status(f"📤 Sending Video\n{get_send_bar(0)} [0.0%]")
+        
+        upload_success = False
+        try:
+            await deliver_video_asset(app_up, CHAT_ID, USER_ID, out_name, f"✅ Process Completed!\n`{out_name}`", prog)
+            upload_success = True
+        except Exception as upload_e:
+            await update_http_status(f"❌ **Upload Error:**\n<code>{html.escape(str(upload_e))}</code>")
+
+        if TASK_TYPE == "compress" and extracted_subs:
+            for sub_f in extracted_subs:
+                try: await app_up.send_document(chat_id=USER_ID, document=sub_f, caption="📄 Extracted Clean Subtitles (.ass)")
+                except:
+                    try: await app_up.send_document(chat_id=CHAT_ID, document=sub_f, caption="📄 Extracted Clean Subtitles (.ass)")
+                    except: pass
+
+        if not upload_success:
+            raise Exception("Video failed to upload (Network timeout or size > 2.0GB)")
+
+        try: await app_up.delete_messages(CHAT_ID, status_msg_id)
+        except: pass
+        await app_up.stop()
+
+    except Exception as e:
+        try: _sync_http_edit(f"❌ **Workflow Error:**\n<code>{html.escape(str(e))}</code>")
+        except: pass
 
 if __name__ == "__main__":
-    asyncio.get_event_loop().run_until_complete(main())
+    asyncio.run(main())
