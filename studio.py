@@ -285,9 +285,8 @@ async def main():
                             if os.path.exists(ass_out): extracted_subs.append(ass_out)
 
             reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
-            # ---- FIX: removed single quotes around min() ----
             if reso_clean and reso_clean.lower() != "none":
-                scale_filter = f"scale=-2:min({reso_clean},ih)"
+                scale_filter = f"scale=-2:min({reso_clean}\\,ih)"
             else:
                 scale_filter = "scale='trunc(iw/2)*2:trunc(ih/2)*2'"
 
