@@ -113,13 +113,20 @@ def get_font_name(font_path):
     return "Arial"
 
 def get_video_dimensions_and_duration(video_path):
-    cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-    duration = 0.0
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=width,height:format=duration",
+           "-of", "default=noprint_wrappers=1", video_path]
+    width, height, duration = 1280, 720, 0.0
     try:
-        res_dur = subprocess.run(cmd_dur, capture_output=True, text=True, timeout=10)
-        if res_dur.stdout.strip(): duration = float(res_dur.stdout.strip())
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        for line in res.stdout.strip().split("\n"):
+            if "=" not in line: continue
+            k, v = line.split("=", 1)
+            if k == "width": width = int(v)
+            elif k == "height": height = int(v)
+            elif k == "duration": duration = float(v)
     except: pass
-    return 1280, 720, duration
+    return width, height, duration
 
 async def download_tg_link(app_instance, link, output_path, step_name):
     if not link or link == "none": return None
@@ -142,7 +149,9 @@ async def download_tg_link(app_instance, link, output_path, step_name):
 async def deliver_video_asset(app_instance, chat_id, target_user, file_path, caption, progress_callback):
     if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
         raise Exception("Processed video missing or empty!")
-    
+
+    width, height, duration = get_video_dimensions_and_duration(file_path)
+
     thumb_path = "thumb.jpg"
     try: subprocess.run(["ffmpeg", "-y", "-i", file_path, "-ss", "00:00:01", "-vframes", "1", thumb_path], capture_output=True, timeout=15)
     except: pass
@@ -153,17 +162,17 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
 
     try:
         pm_msg = await asyncio.wait_for(
-            app_instance.send_document(chat_id=target_user, document=file_path, caption=caption, thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), 
+            app_instance.send_video(chat_id=target_user, video=file_path, width=width, height=height, duration=int(duration), supports_streaming=True, caption=caption, thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video")), 
             timeout=1800
         )
-        if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+        if pm_msg and pm_msg.video: file_id = pm_msg.video.file_id
     except Exception as e:
         try:
             pm_msg = await asyncio.wait_for(
-                app_instance.send_document(chat_id=chat_id, document=file_path, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), 
+                app_instance.send_video(chat_id=chat_id, video=file_path, width=width, height=height, duration=int(duration), supports_streaming=True, caption=f"⚠️ <a href='tg://user?id={target_user}'>User</a>, Video Ready:\n\n{caption}", thumb=thumb_path, progress=progress_callback, progress_args=(app_instance, "sending_video"), parse_mode=ParseMode.HTML), 
                 timeout=1800
             )
-            if pm_msg and pm_msg.document: file_id = pm_msg.document.file_id
+            if pm_msg and pm_msg.video: file_id = pm_msg.video.file_id
         except Exception as inner_e: 
             size_mb = os.path.getsize(file_path)/1048576
             err_msg = f"❌ **Video Upload Failed!**\nFile is {size_mb:.1f} MB (Check if it exceeds 2000 MB limit)\nError: {inner_e}"
@@ -171,7 +180,7 @@ async def deliver_video_asset(app_instance, chat_id, target_user, file_path, cap
             raise Exception(err_msg)
 
     if file_id:
-        try: await app_instance.send_document(chat_id=DESK_CHANNEL_ID, document=file_id, caption=f"🎬 Logs: {caption}\nUser: `{target_user}`")
+        try: await app_instance.send_video(chat_id=DESK_CHANNEL_ID, video=file_id, caption=f"🎬 Logs: {caption}\nUser: `{target_user}`")
         except: pass
 
     return pm_msg
@@ -292,11 +301,11 @@ async def main():
 
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
             
-            # CRF 34 for high compression
+            # CRF 22 = balanced quality/size, ultrafast preset = max speed
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", 
                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
             ]
             
@@ -333,9 +342,9 @@ async def main():
             await update_http_status(f"⚙️ {process_title}\n{get_process_bar(0)} [0.0%]")
 
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "fast", "-crf", "34", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
 
             process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             last_edit = time.time()
