@@ -72,6 +72,23 @@ def _send_to_github(task):
 async def trigger_github(task):
     return await asyncio.to_thread(_send_to_github, task)
 
+# Real queue: GitHub par ek time par max 2 tasks hi chalte hain,
+# baaki queue mein wait karke apna number aane par khud dispatch ho jaate hain.
+task_queue = asyncio.Queue()
+
+async def queue_worker():
+    while True:
+        payload = await task_queue.get()
+        while await is_github_busy():
+            await asyncio.sleep(15)
+        ok, msg = await trigger_github(payload)
+        if not ok:
+            print(f"Dispatch failed: {msg}")
+        task_queue.task_done()
+
+async def enqueue_task(payload):
+    await task_queue.put(payload)
+
 async def get_pinned_file_link(chat_id, target_name):
     try:
         chat = await app.get_chat(chat_id)
@@ -165,7 +182,7 @@ async def compress_cmd(c, m: Message):
         "resolution": cmd, "wm_id": "none", "wm_pos": "none", "rename": orig_name, 
         "font_link": font_link, "trigger_msg_id": str(st.id)
     }
-    await trigger_github(payload)
+    await enqueue_task(payload)
 
 @app.on_message(filters.command("sub"))
 async def hsub_cmd(c, m: Message):
@@ -260,7 +277,7 @@ async def execute_dispatch_hardsub(user_id, msg: Message):
         "resolution": "none", "wm_id": wm_link, "wm_pos": wm_pos, "rename": data.get("rename", "none"),
         "font_link": await get_pinned_file_link(data["chat_id"], "file"), "trigger_msg_id": str(st.id)
     }
-    await trigger_github(payload)
+    await enqueue_task(payload)
 
 @app.on_callback_query(filters.regex("cancel_active_run"))
 async def cancel_run_callback(c, q: CallbackQuery):
@@ -300,6 +317,7 @@ async def main():
     
     await app.start()
     print("🚀 Bot Client Connected Successfully!")
+    asyncio.create_task(queue_worker())
     await idle()
     await app.stop()
 
