@@ -275,6 +275,23 @@ async def main():
         # ---------------- ENCODE STAGE ----------------
         process_title = "Compressing Video" if TASK_TYPE == "compress" else "Encoding Hardsub"
 
+        # Rate control clamps to strictly keep target file size within bounds
+        # 1080p <= 300MB, 720p <= 200MB, 480p <= 130MB
+        reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
+        
+        if reso_clean == "1080":
+            max_rate = "1400k"
+            buf_size = "2000k"
+        elif reso_clean == "720":
+            max_rate = "850k"
+            buf_size = "1300k"
+        elif reso_clean == "480":
+            max_rate = "500k"
+            buf_size = "800k"
+        else:
+            max_rate = "1200k"
+            buf_size = "1800k"
+
         if TASK_TYPE == "compress":
             await update_http_status("⚙️ <b>Extracting internal subtitles...</b>")
             cmd_probe = ["ffprobe", "-v", "error", "-select_streams", "s", "-show_entries", "stream=index,codec_name", "-of", "csv=p=0", video_file]
@@ -299,7 +316,6 @@ async def main():
                             convert_to_clean_ass(temp_sub, ass_out)
                             if os.path.exists(ass_out): extracted_subs.append(ass_out)
 
-            reso_clean = str(RESOLUTION).replace("p", "").replace("P", "").strip() if RESOLUTION else ""
             if reso_clean and reso_clean.lower() != "none":
                 scale_filter = f"scale=-2:min({reso_clean}\\,ih)"
             else:
@@ -307,11 +323,14 @@ async def main():
 
             await update_http_status(f"⚙️ <b>{process_title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
             
+            # CRF 28 + maxrate prevents file expansion while ultrafast maintains max speed
             cmd = [
                 "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", scale_filter, 
                 "-map", "0:v", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", 
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out_name
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
+                "-maxrate", max_rate, "-bufsize", buf_size,
+                "-pix_fmt", "yuv420p", "-threads", "0", 
+                "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out_name
             ]
         else:
             vf_filter = "subtitles='ready_sub.ass':charenc=UTF-8"
@@ -322,9 +341,22 @@ async def main():
             await update_http_status(f"⚙️ <b>{process_title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
 
             if wm_file and os.path.exists(wm_file):
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = [
+                    "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-i", wm_file, 
+                    "-filter_complex", f"[0:v]{v_filter}[vsub];[1:v]scale=200:-1[wm];[vsub][wm]overlay={overlay_coord}", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
+                    "-maxrate", max_rate, "-bufsize", buf_size,
+                    "-pix_fmt", "yuv420p", "-threads", "0", 
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out_name
+                ]
             else:
-                cmd = ["ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-threads", "0", "-c:a", "aac", "-movflags", "+faststart", out_name]
+                cmd = [
+                    "ffmpeg", "-y", "-progress", "pipe:1", "-i", video_file, "-vf", v_filter, 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", 
+                    "-maxrate", max_rate, "-bufsize", buf_size,
+                    "-pix_fmt", "yuv420p", "-threads", "0", 
+                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", out_name
+                ]
 
         process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         last_edit = time.time()
