@@ -3,6 +3,9 @@ import pyrogram.utils
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
+from pyrogram.file_id import FileId
+import logging
 from fontTools.ttLib import TTFont
 
 try:
@@ -11,6 +14,7 @@ try:
 except ImportError:
     print("WARNING: TgCrypto missing! requirements.txt me 'tgcrypto' add karo, warna speed bahut kam rahegi.", flush=True)
 
+logging.basicConfig(level=logging.WARNING, format="[pyrogram] %(levelname)s %(message)s")
 pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") else "chat" if str(p).startswith("-") else "user"
 
 API_ID = int(os.getenv("API_ID"))
@@ -37,6 +41,7 @@ TRANSFER_TIMEOUT = 2400
 
 last_time = 0
 start_time = 0
+last_bytes = 0
 status_msg_id = None
 os.makedirs("fonts", exist_ok=True)
 
@@ -151,7 +156,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 75      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
+DLG_FONT_SIZE = 80      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
@@ -369,9 +374,10 @@ def get_font_name(font_path):
 # PROGRESS / STATUS
 # =========================================================
 def reset_prog():
-    global last_time, start_time
+    global last_time, start_time, last_bytes
     last_time = time.time()
     start_time = time.time()
+    last_bytes = 0
 
 
 def get_download_bar(percent):
@@ -414,16 +420,17 @@ async def update_http_status(text, cancel=True):
 
 
 async def prog(c, t, app_instance, step_name):
-    global last_time, start_time
+    global last_time, start_time, last_bytes
     now = time.time()
     if start_time == 0:
         start_time = last_time = now
         return
 
     if now - last_time > 8 or c == t:
-        elapsed = now - start_time
-        speed = c / elapsed if elapsed > 0 else 0
+        interval = now - last_time
+        speed = (c - last_bytes) / interval if interval > 0 else 0   # abhi ki speed (average nahi)
         speed_mb = (speed / 1024) / 1024
+        last_bytes = c
         percent = (c / t) * 100 if t > 0 else 0
 
         if step_name in ["hardsub_download", "compress_download"]:
@@ -463,7 +470,10 @@ def get_video_dimensions_and_duration(video_path):
 
 CHUNK = 1024 * 1024        # Telegram ka max chunk (1 MiB)
 PIECE_CHUNKS = 8           # har piece 8 MiB
-DL_WORKERS = 12            # itne pieces ek saath download hote hain
+DL_WORKERS = int(os.getenv("DL_WORKERS") or 12)   # itne pieces ek saath download hote hain
+
+
+LAST_DL_ERROR = ""
 
 
 def parse_msg_id(link):
@@ -480,10 +490,13 @@ async def fast_download(app_instance, msg, out_path, step_name):
     if total < 4 * CHUNK:
         return None                                   # chhoti file -> normal download kaafi hai
     n_chunks = (total + CHUNK - 1) // CHUNK
-
-    queue = asyncio.Queue()
-    for s in range(0, n_chunks, PIECE_CHUNKS):
-        queue.put_nowait((s, min(PIECE_CHUNKS, n_chunks - s)))
+    try:
+        file_dc = FileId.decode(media.file_id).dc_id
+        home_dc = await app_instance.storage.dc_id()
+        print(f"[diag] file {total/1048576:.0f}MB | file DC={file_dc} | bot home DC={home_dc} | workers={DL_WORKERS}", flush=True)
+    except Exception as e:
+        print(f"[diag] dc info unavailable: {e}", flush=True)
+    t_begin = time.time()
 
     if os.path.exists(out_path):
         os.remove(out_path)
@@ -492,58 +505,83 @@ async def fast_download(app_instance, msg, out_path, step_name):
     fd = os.open(out_path, os.O_RDWR)
     state = {"done": 0}
 
-    async def worker():
+    async def fetch_piece(start, count):
+        got, attempt = 0, 0
         while True:
             try:
-                start, count = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            got = 0
-            for attempt in range(1, 7):
-                try:
-                    async for chunk in app_instance.stream_media(msg, offset=start + got, limit=count - got):
-                        os.pwrite(fd, chunk, (start + got) * CHUNK)
-                        got += 1
-                        state["done"] += len(chunk)
-                        await prog(min(state["done"], total), total, app_instance, step_name)
-                    if got >= count:
-                        break
-                    raise Exception("short piece")
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    print(f"piece {start} retry {attempt}: {e}", flush=True)
-                    await asyncio.sleep(min(2 * attempt, 10))
-            else:
-                raise Exception(f"download piece {start} failed")
+                async for chunk in app_instance.stream_media(msg, offset=start + got, limit=count - got):
+                    os.pwrite(fd, chunk, (start + got) * CHUNK)
+                    got += 1
+                    state["done"] += len(chunk)
+                    await prog(min(state["done"], total), total, app_instance, step_name)
+                if got >= count:
+                    return
+                raise Exception("short piece")
+            except asyncio.CancelledError:
+                raise
+            except FloodWait as e:
+                wait = int(getattr(e, "value", 30)) + 1
+                print(f"FloodWait {wait}s (piece {start}) - wait kar raha hu", flush=True)
+                await asyncio.sleep(wait)          # flood retry count nahi hota
+            except Exception as e:
+                attempt += 1
+                print(f"piece {start} retry {attempt}: {e}", flush=True)
+                if attempt >= 6:
+                    raise Exception(f"download piece {start} failed: {e}")
+                await asyncio.sleep(min(2 * attempt, 10))
 
-    tasks = [asyncio.create_task(worker()) for _ in range(DL_WORKERS)]
     try:
-        await asyncio.gather(*tasks)
-    except BaseException:
-        for t in tasks:
-            t.cancel()
-        raise
+        # 1) Pehle SIRF 1 chunk: isse media connection + auth ek hi baar banta hai
+        #    (12 workers ek saath banate the -> auth.ExportAuthorization FloodWait aata tha)
+        await fetch_piece(0, 1)
+        print(f"[diag] first chunk done in {time.time()-t_begin:.1f}s (zyada ho to FloodWait/auth ka wait hai)", flush=True)
+        t_par = time.time()
+
+        # 2) Ab baaki file parallel
+        queue = asyncio.Queue()
+        for st in range(1, n_chunks, PIECE_CHUNKS):
+            queue.put_nowait((st, min(PIECE_CHUNKS, n_chunks - st)))
+
+        async def worker():
+            while True:
+                try:
+                    st, cnt = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                await fetch_piece(st, cnt)
+
+        tasks = [asyncio.create_task(worker()) for _ in range(DL_WORKERS)]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            raise
     finally:
         os.close(fd)
     if state["done"] < total:
         raise Exception("fast download incomplete")
+    dt = max(time.time() - t_par, 0.001)
+    print(f"[diag] parallel part: {(total-CHUNK)/1048576/dt:.2f} MB/s | total time {time.time()-t_begin:.0f}s", flush=True)
     await prog(total, total, app_instance, step_name)
     return out_path
 
 
 async def download_tg_link(app_instance, link, output_path, step_name, min_size=1, show_progress=True):
+    global LAST_DL_ERROR
     if not is_set(link):
         return None
     msg_id = parse_msg_id(link)
     if msg_id is None:
-        print(f"Download: bad link {link}")
+        LAST_DL_ERROR = f"bad link: {link}"
+        print(f"Download: {LAST_DL_ERROR}")
         return None
     for attempt in (1, 2):
         try:
             msg = await app_instance.get_messages(CHAT_ID, msg_id)
             if not (msg and (msg.document or msg.video or msg.photo or msg.animation or msg.audio)):
-                print(f"Download: message {msg_id} has no media")
+                LAST_DL_ERROR = f"message {msg_id} me media nahi mila (ya bot is chat ka message dekh nahi pa raha)"
+                print(f"Download: {LAST_DL_ERROR}")
                 return None
             if show_progress:
                 reset_prog()
@@ -562,7 +600,9 @@ async def download_tg_link(app_instance, link, output_path, step_name, min_size=
             if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
                 return downloaded
         except Exception as e:
-            print(f"Download Exception (try {attempt}): {e}")
+            LAST_DL_ERROR = f"{type(e).__name__}: {e}"
+            print(f"Download Exception (try {attempt}): {LAST_DL_ERROR}")
+            await asyncio.sleep(2)
     return None
 
 
@@ -725,15 +765,17 @@ async def main():
         "in_memory": True,
         "workers": 4,
         "max_concurrent_transmissions": 16,   # parallel download/upload ke liye
-        "sleep_threshold": 60,                # FloodWait <60s ho to khud wait kar leta hai
+        "sleep_threshold": 600,               # FloodWait 10 min tak ho to khud wait karke aage badhta hai
         "no_updates": True,
     }
 
     app = Client(**client_params)
     await app.start()
 
-    try: await app.get_chat(CHAT_ID)
-    except Exception: pass
+    try:
+        await app.get_chat(CHAT_ID)
+    except Exception as e:
+        print(f"get_chat({CHAT_ID}) failed: {type(e).__name__}: {e}", flush=True)
 
     # Re-use the bot's "Task Dispatched..." message as the status message (saves a delete + a send).
     if is_set(TRIGGER_MSG_ID):
@@ -753,21 +795,17 @@ async def main():
         is_hardsub = TASK_TYPE == "hardsub"
         step_dl = "hardsub_download" if is_hardsub else "compress_download"
 
-        # ---- downloads: video starts right away, subtitle + font (tiny) fetched alongside ----
-        video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
+        # ---- downloads: pehle chhoti files (sub/font), phir video ----
+        # (ek saath chalane se Telegram ka auth.ExportAuthorization FloodWait aa raha tha)
         sub_file = font_path = None
-        try:
-            if is_hardsub:
-                sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
-                if not sub_file:
-                    raise Exception("Subtitle file not found or download failed.")
-            font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
-        except Exception:
-            video_task.cancel()
-            raise
-        video_file = await video_task
+        if is_hardsub:
+            sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
+            if not sub_file:
+                raise Exception(f"Subtitle download failed. Reason: {LAST_DL_ERROR or 'unknown'}")
+        font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
+        video_file = await download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000)
         if not video_file:
-            raise Exception("Video download failed or file is 0 bytes.")
+            raise Exception(f"Video download failed. Reason: {LAST_DL_ERROR or 'unknown'}")
 
         vid_width, vid_height, duration = get_video_dimensions_and_duration(video_file)
         if duration <= 0:
