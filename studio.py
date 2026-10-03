@@ -15,6 +15,39 @@ except ImportError:
     print("WARNING: TgCrypto missing! requirements.txt me 'tgcrypto' add karo, warna speed bahut kam rahegi.", flush=True)
 
 logging.basicConfig(level=logging.WARNING, format="[pyrogram] %(levelname)s %(message)s")
+FLOOD = {"wait": 0, "since": 0.0}
+
+
+class FloodBlocked(Exception):
+    def __init__(self, wait):
+        self.wait = int(wait)
+        super().__init__(
+            f"Telegram ne bot ko {self.wait // 60} min {self.wait % 60}s ke liye rok diya "
+            f"(FloodWait: auth.ExportAuthorization). Itna wait karke hi task dobara chalao. "
+            f"Beech me chalane se ye wait aur badhta hai.")
+
+
+class _FloodSniffer(logging.Handler):
+    """Pyrogram get_file FloodWait ko andar hi nigal leta hai (sirf log karta hai).
+    Yahan se pakad ke turant rok dete hain - retry karne se Telegram ka ban lamba hota jata hai."""
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            m = re.search(r"A wait of (\d+) seconds is required", msg)
+            if m and "ExportAuthorization" in msg:
+                FLOOD["wait"], FLOOD["since"] = int(m.group(1)), time.time()
+        except Exception:
+            pass
+
+
+logging.getLogger("pyrogram").addHandler(_FloodSniffer())
+
+
+def check_flood():
+    if FLOOD["wait"] and time.time() - FLOOD["since"] < 120:
+        raise FloodBlocked(FLOOD["wait"] - (time.time() - FLOOD["since"]))
+
+
 pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") else "chat" if str(p).startswith("-") else "user"
 
 API_ID = int(os.getenv("API_ID"))
@@ -516,8 +549,9 @@ async def fast_download(app_instance, msg, out_path, step_name):
                     await prog(min(state["done"], total), total, app_instance, step_name)
                 if got >= count:
                     return
+                check_flood()                      # flood ho to yahin ruk jao (retry = ban badhega)
                 raise Exception("short piece")
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, FloodBlocked):
                 raise
             except FloodWait as e:
                 wait = int(getattr(e, "value", 30)) + 1
@@ -590,15 +624,21 @@ async def download_tg_link(app_instance, link, output_path, step_name, min_size=
                 try:
                     downloaded = await asyncio.wait_for(
                         fast_download(app_instance, msg, output_path, step_name), timeout=TRANSFER_TIMEOUT)
+                except FloodBlocked:
+                    raise
                 except Exception as e:
                     print(f"Fast download failed ({e}); normal download use ho raha hai", flush=True)
+                    check_flood()
                     reset_prog()
             if not downloaded:
                 kw = dict(progress=prog, progress_args=(app_instance, step_name)) if show_progress else {}
                 downloaded = await asyncio.wait_for(
                     app_instance.download_media(msg, file_name=output_path, **kw), timeout=TRANSFER_TIMEOUT)
+            check_flood()
             if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
                 return downloaded
+        except FloodBlocked:
+            raise
         except Exception as e:
             LAST_DL_ERROR = f"{type(e).__name__}: {e}"
             print(f"Download Exception (try {attempt}): {LAST_DL_ERROR}")
