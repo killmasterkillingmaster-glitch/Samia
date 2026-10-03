@@ -62,15 +62,14 @@ jobs:
       - name: Install High-Speed FFmpeg & Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg
-          pip install --no-cache-dir -r requirements.txt
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-liberation fontconfig
+          pip install --no-cache-dir -r requirements.txt tgcrypto
 
       - name: Run Studio Processor
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          STRING_SESSION: ${{ secrets.STRING_SESSION }}
           TASK_TYPE: ${{ github.event.inputs.task_type }}
           VIDEO_ID: ${{ github.event.inputs.video_id }}
           SUB_ID: ${{ github.event.inputs.sub_id }}
