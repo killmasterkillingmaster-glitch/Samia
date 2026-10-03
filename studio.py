@@ -151,7 +151,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 90      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
+DLG_FONT_SIZE = 75      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
