@@ -5,12 +5,17 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 from fontTools.ttLib import TTFont
 
+try:
+    import tgcrypto  # noqa: F401  (Pyrogram ki encryption C me hoti hai -> download/upload 10-20x fast)
+    print("TgCrypto: ON (fast mode)", flush=True)
+except ImportError:
+    print("WARNING: TgCrypto missing! requirements.txt me 'tgcrypto' add karo, warna speed bahut kam rahegi.", flush=True)
+
 pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") else "chat" if str(p).startswith("-") else "user"
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-STRING_SESSION = os.getenv("STRING_SESSION")
 TASK_TYPE = os.getenv("TASK_TYPE")
 VIDEO_ID = os.getenv("VIDEO_ID")
 SUB_ID = os.getenv("SUB_ID")
@@ -34,6 +39,17 @@ last_time = 0
 start_time = 0
 status_msg_id = None
 os.makedirs("fonts", exist_ok=True)
+
+
+_bg_tasks = set()
+
+
+def bg(coro):
+    """create_task ka safe version (task ko garbage-collect hone se bachata hai)."""
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
 
 
 def is_set(v):
@@ -135,7 +151,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 80
+DLG_FONT_SIZE = 90      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
@@ -308,9 +324,9 @@ def build_dialogue_ass(cues, font_name, bold, meter):
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font_name},90,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
-        f"Style: Italic,{font_name},90,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,-1,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
-        f"Style: Flashback,{font_name},90,&H00FFFFFF,&H000000FF,&H00505050,&H00505050,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Default,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Italic,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,-1,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Flashback,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00505050,&H00505050,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
         f"Style: Signs,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,20,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
@@ -416,7 +432,7 @@ async def prog(c, t, app_instance, step_name):
             text = f"📤 <b>Sending Video</b>\n<code>{get_send_bar(percent)}</code> [{percent:.1f}%]\n🚀 Speed: <b>{speed_mb:.2f} MB/s</b>\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
 
         print(f"[{step_name}] {percent:.1f}%  {speed_mb:.2f} MB/s", flush=True)
-        asyncio.create_task(update_http_status(text))
+        bg(update_http_status(text))
         last_time = now
 
 
@@ -445,24 +461,106 @@ def get_video_dimensions_and_duration(video_path):
     return width, height, duration
 
 
+CHUNK = 1024 * 1024        # Telegram ka max chunk (1 MiB)
+PIECE_CHUNKS = 8           # har piece 8 MiB
+DL_WORKERS = 12            # itne pieces ek saath download hote hain
+
+
+def parse_msg_id(link):
+    """https://t.me/c/123/456  /  .../456?single  /  plain 456 -> 456"""
+    nums = re.findall(r"\d+", str(link).split("?")[0])
+    return int(nums[-1]) if nums else None
+
+
+async def fast_download(app_instance, msg, out_path, step_name):
+    """Parallel download: file ko 8MB ke pieces me baant ke 12 piece ek saath khinchta hai.
+    (Pyrogram ka normal download_media ek hi stream me chalta hai = slow.)"""
+    media = msg.video or msg.document or msg.animation or msg.audio
+    total = getattr(media, "file_size", 0) or 0
+    if total < 4 * CHUNK:
+        return None                                   # chhoti file -> normal download kaafi hai
+    n_chunks = (total + CHUNK - 1) // CHUNK
+
+    queue = asyncio.Queue()
+    for s in range(0, n_chunks, PIECE_CHUNKS):
+        queue.put_nowait((s, min(PIECE_CHUNKS, n_chunks - s)))
+
+    if os.path.exists(out_path):
+        os.remove(out_path)
+    with open(out_path, "wb") as f:
+        f.truncate(total)
+    fd = os.open(out_path, os.O_RDWR)
+    state = {"done": 0}
+
+    async def worker():
+        while True:
+            try:
+                start, count = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            got = 0
+            for attempt in range(1, 7):
+                try:
+                    async for chunk in app_instance.stream_media(msg, offset=start + got, limit=count - got):
+                        os.pwrite(fd, chunk, (start + got) * CHUNK)
+                        got += 1
+                        state["done"] += len(chunk)
+                        await prog(min(state["done"], total), total, app_instance, step_name)
+                    if got >= count:
+                        break
+                    raise Exception("short piece")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    print(f"piece {start} retry {attempt}: {e}", flush=True)
+                    await asyncio.sleep(min(2 * attempt, 10))
+            else:
+                raise Exception(f"download piece {start} failed")
+
+    tasks = [asyncio.create_task(worker()) for _ in range(DL_WORKERS)]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        raise
+    finally:
+        os.close(fd)
+    if state["done"] < total:
+        raise Exception("fast download incomplete")
+    await prog(total, total, app_instance, step_name)
+    return out_path
+
+
 async def download_tg_link(app_instance, link, output_path, step_name, min_size=1, show_progress=True):
     if not is_set(link):
         return None
+    msg_id = parse_msg_id(link)
+    if msg_id is None:
+        print(f"Download: bad link {link}")
+        return None
     for attempt in (1, 2):
         try:
-            msg_id = int(link.split("/")[-1])
             msg = await app_instance.get_messages(CHAT_ID, msg_id)
-            if msg and (msg.document or msg.video or msg.photo or msg.animation):
-                if show_progress:
+            if not (msg and (msg.document or msg.video or msg.photo or msg.animation or msg.audio)):
+                print(f"Download: message {msg_id} has no media")
+                return None
+            if show_progress:
+                reset_prog()
+            downloaded = None
+            if show_progress and not output_path.endswith("/"):
+                try:
+                    downloaded = await asyncio.wait_for(
+                        fast_download(app_instance, msg, output_path, step_name), timeout=TRANSFER_TIMEOUT)
+                except Exception as e:
+                    print(f"Fast download failed ({e}); normal download use ho raha hai", flush=True)
                     reset_prog()
+            if not downloaded:
                 kw = dict(progress=prog, progress_args=(app_instance, step_name)) if show_progress else {}
                 downloaded = await asyncio.wait_for(
                     app_instance.download_media(msg, file_name=output_path, **kw), timeout=TRANSFER_TIMEOUT)
-                if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
-                    return downloaded
-            else:
-                print(f"Download: message {msg_id} has no media")
-                return None
+            if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
+                return downloaded
         except Exception as e:
             print(f"Download Exception (try {attempt}): {e}")
     return None
@@ -551,11 +649,18 @@ async def extract_embedded_subs(video_file, base_name):
         return []
 
 
+# Quality settings (GitHub Actions env se bhi badal sakte ho: X264_PRESET / X264_CRF)
+X264_PRESET = os.getenv("X264_PRESET") or "veryfast"   # ultrafast = kharab quality, veryfast = clean + still fast
+X264_CRF = os.getenv("X264_CRF") or "23"               # chhota = better quality / bada size (22-26 best range)
+
+
 def pick_rate(effective_height):
-    if effective_height >= 1080: return "2200k", "4400k"
-    if effective_height >= 720: return "1600k", "3200k"
-    if effective_height >= 480: return "1000k", "2000k"
-    return "700k", "1400k"
+    """maxrate sirf SAFETY ceiling hai (heavy scenes me bitrate spike roke). Pehle bahut kam tha
+    (1600k @720p) -> CRF ko bitrate nahi milta tha -> blocks / video 'fat' jati thi."""
+    if effective_height >= 1080: return "5000k", "10000k"
+    if effective_height >= 720: return "3000k", "6000k"
+    if effective_height >= 480: return "1800k", "3600k"
+    return "1000k", "2000k"
 
 
 def build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size):
@@ -563,12 +668,13 @@ def build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size):
         "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
         "-i", video_file, "-vf", vf,
         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-        "-maxrate", max_rate, "-bufsize", buf_size,
+        "-c:v", "libx264", "-preset", X264_PRESET, "-crf", X264_CRF,
+        "-profile:v", "high", "-maxrate", max_rate, "-bufsize", buf_size,
+        "-x264-params", "aq-mode=3",          # dark scenes me blocks / banding kam
         "-pix_fmt", "yuv420p", "-threads", "0",
         # keyframe every 2s (IDR) -> seeking anywhere in the player starts instantly
         "-force_key_frames", "expr:gte(t,n_forced*2)", "-forced-idr", "1",
-        "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1:first_pts=0",
         "-max_muxing_queue_size", "1024",
         "-movflags", "+faststart", out_name,
     ]
@@ -591,7 +697,7 @@ async def run_ffmpeg(cmd, duration, title):
                 try:
                     percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                     print(f"[encode] {percent:.1f}%", flush=True)
-                    asyncio.create_task(update_http_status(
+                    bg(update_http_status(
                         f"⚙️ <b>{title}</b>\n<code>{get_process_bar(percent)}</code> [{percent:.1f}%]"))
                 except Exception:
                     pass
@@ -615,14 +721,13 @@ async def main():
         "name": "worker_single_session",
         "api_id": API_ID,
         "api_hash": API_HASH,
-        "workers": 16,
-        "max_concurrent_transmissions": 10,
+        "bot_token": BOT_TOKEN,           # sirf bot token (string session use nahi hota)
+        "in_memory": True,
+        "workers": 4,
+        "max_concurrent_transmissions": 16,   # parallel download/upload ke liye
+        "sleep_threshold": 60,                # FloodWait <60s ho to khud wait kar leta hai
         "no_updates": True,
     }
-    if STRING_SESSION and STRING_SESSION.strip() != "":
-        client_params["session_string"] = STRING_SESSION.strip()
-    else:
-        client_params["bot_token"] = BOT_TOKEN
 
     app = Client(**client_params)
     await app.start()
@@ -683,7 +788,8 @@ async def main():
         effective_height = int(reso_clean) if has_reso else vid_height
         max_rate, buf_size = pick_rate(effective_height)
         # (-2 keeps width even; min(...) never upscales; trunc keeps height even)
-        scale_stage = f"scale=-2:'min({reso_clean},trunc(ih/2)*2)'" if has_reso else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        scale_stage = (f"scale=-2:'min({reso_clean},trunc(ih/2)*2)':flags=lanczos" if has_reso
+                       else "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos")
 
         extract_task = None
         if is_hardsub:
