@@ -3,57 +3,14 @@ import pyrogram.utils
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait
-from pyrogram.file_id import FileId
-import logging
 from fontTools.ttLib import TTFont
-
-try:
-    import tgcrypto  # noqa: F401  (Pyrogram ki encryption C me hoti hai -> download/upload 10-20x fast)
-    print("TgCrypto: ON (fast mode)", flush=True)
-except ImportError:
-    print("WARNING: TgCrypto missing! requirements.txt me 'tgcrypto' add karo, warna speed bahut kam rahegi.", flush=True)
-
-logging.basicConfig(level=logging.WARNING, format="[pyrogram] %(levelname)s %(message)s")
-FLOOD = {"wait": 0, "since": 0.0}
-
-
-class FloodBlocked(Exception):
-    def __init__(self, wait):
-        self.wait = int(wait)
-        super().__init__(
-            f"Telegram ne bot ko {self.wait // 60} min {self.wait % 60}s ke liye rok diya "
-            f"(FloodWait: auth.ExportAuthorization). Itna wait karke hi task dobara chalao. "
-            f"Beech me chalane se ye wait aur badhta hai.")
-
-
-class _FloodSniffer(logging.Handler):
-    """Pyrogram get_file FloodWait ko andar hi nigal leta hai (sirf log karta hai).
-    Yahan se pakad ke turant rok dete hain - retry karne se Telegram ka ban lamba hota jata hai."""
-    def emit(self, record):
-        try:
-            msg = record.getMessage()
-            m = re.search(r"A wait of (\d+) seconds is required", msg)
-            if m and "ExportAuthorization" in msg:
-                FLOOD["wait"], FLOOD["since"] = int(m.group(1)), time.time()
-        except Exception:
-            pass
-
-
-logging.getLogger("pyrogram").addHandler(_FloodSniffer())
-
-
-def check_flood():
-    if FLOOD["wait"] and time.time() - FLOOD["since"] < 120:
-        raise FloodBlocked(FLOOD["wait"] - (time.time() - FLOOD["since"]))
-
 
 pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") else "chat" if str(p).startswith("-") else "user"
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_SESSION = (os.getenv("BOT_SESSION") or "").strip()   # OPTIONAL: bot ki saved session (make_session.py se banti hai)
+STRING_SESSION = os.getenv("STRING_SESSION")
 TASK_TYPE = os.getenv("TASK_TYPE")
 VIDEO_ID = os.getenv("VIDEO_ID")
 SUB_ID = os.getenv("SUB_ID")
@@ -75,20 +32,8 @@ TRANSFER_TIMEOUT = 2400
 
 last_time = 0
 start_time = 0
-last_bytes = 0
 status_msg_id = None
 os.makedirs("fonts", exist_ok=True)
-
-
-_bg_tasks = set()
-
-
-def bg(coro):
-    """create_task ka safe version (task ko garbage-collect hone se bachata hai)."""
-    t = asyncio.create_task(coro)
-    _bg_tasks.add(t)
-    t.add_done_callback(_bg_tasks.discard)
-    return t
 
 
 def is_set(v):
@@ -190,7 +135,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 80      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
+DLG_FONT_SIZE = 80
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
@@ -363,9 +308,9 @@ def build_dialogue_ass(cues, font_name, bold, meter):
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
-        f"Style: Italic,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,-1,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
-        f"Style: Flashback,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00505050,&H00505050,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Default,{font_name},90,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Italic,{font_name},90,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,-1,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
+        f"Style: Flashback,{font_name},90,&H00FFFFFF,&H000000FF,&H00505050,&H00505050,-1,0,0,0,100,100,0,0,1,4.5,3.5,2,120,120,70,1\n"
         f"Style: Signs,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,20,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
@@ -408,10 +353,9 @@ def get_font_name(font_path):
 # PROGRESS / STATUS
 # =========================================================
 def reset_prog():
-    global last_time, start_time, last_bytes
+    global last_time, start_time
     last_time = time.time()
     start_time = time.time()
-    last_bytes = 0
 
 
 def get_download_bar(percent):
@@ -454,17 +398,16 @@ async def update_http_status(text, cancel=True):
 
 
 async def prog(c, t, app_instance, step_name):
-    global last_time, start_time, last_bytes
+    global last_time, start_time
     now = time.time()
     if start_time == 0:
         start_time = last_time = now
         return
 
     if now - last_time > 8 or c == t:
-        interval = now - last_time
-        speed = (c - last_bytes) / interval if interval > 0 else 0   # abhi ki speed (average nahi)
+        elapsed = now - start_time
+        speed = c / elapsed if elapsed > 0 else 0
         speed_mb = (speed / 1024) / 1024
-        last_bytes = c
         percent = (c / t) * 100 if t > 0 else 0
 
         if step_name in ["hardsub_download", "compress_download"]:
@@ -473,7 +416,7 @@ async def prog(c, t, app_instance, step_name):
             text = f"📤 <b>Sending Video</b>\n<code>{get_send_bar(percent)}</code> [{percent:.1f}%]\n🚀 Speed: <b>{speed_mb:.2f} MB/s</b>\n📦 {c/1048576:.1f}MB / {t/1048576:.1f}MB"
 
         print(f"[{step_name}] {percent:.1f}%  {speed_mb:.2f} MB/s", flush=True)
-        bg(update_http_status(text))
+        asyncio.create_task(update_http_status(text))
         last_time = now
 
 
@@ -502,149 +445,26 @@ def get_video_dimensions_and_duration(video_path):
     return width, height, duration
 
 
-CHUNK = 1024 * 1024        # Telegram ka max chunk (1 MiB)
-DL_WORKERS = int(os.getenv("DL_WORKERS") or 4)    # itne connections ek saath (har ek = 1 auth export, isliye zyada mat karo)
-
-
-LAST_DL_ERROR = ""
-
-
-def parse_msg_id(link):
-    """https://t.me/c/123/456  /  .../456?single  /  plain 456 -> 456"""
-    nums = re.findall(r"\d+", str(link).split("?")[0])
-    return int(nums[-1]) if nums else None
-
-
-async def fast_download(app_instance, msg, out_path, step_name):
-    """Parallel download: file ko 8MB ke pieces me baant ke 12 piece ek saath khinchta hai.
-    (Pyrogram ka normal download_media ek hi stream me chalta hai = slow.)"""
-    media = msg.video or msg.document or msg.animation or msg.audio
-    total = getattr(media, "file_size", 0) or 0
-    if total < 4 * CHUNK:
-        return None                                   # chhoti file -> normal download kaafi hai
-    n_chunks = (total + CHUNK - 1) // CHUNK
-    try:
-        file_dc = FileId.decode(media.file_id).dc_id
-        home_dc = await app_instance.storage.dc_id()
-        print(f"[diag] file {total/1048576:.0f}MB | file DC={file_dc} | bot home DC={home_dc} | workers={DL_WORKERS}", flush=True)
-    except Exception as e:
-        print(f"[diag] dc info unavailable: {e}", flush=True)
-    t_begin = time.time()
-
-    if os.path.exists(out_path):
-        os.remove(out_path)
-    with open(out_path, "wb") as f:
-        f.truncate(total)
-    fd = os.open(out_path, os.O_RDWR)
-    state = {"done": 0}
-
-    setup_lock = asyncio.Lock()
-
-    async def fetch_range(idx, start, count):
-        """Ek worker = ek lamba continuous range = Pyrogram ka EK get_file call.
-        (Is Pyrogram version me har get_file call apna naya media session banata hai + auth.ExportAuthorization
-        karta hai. Pehle har 8MB piece pe call hoti thi = 170+ exports = FloodWait. Ab sirf DL_WORKERS exports.)"""
-        got, attempt = 0, 0
-        while got < count:
-            agen = app_instance.stream_media(msg, offset=start + got, limit=count - got).__aiter__()
-            try:
-                # session banana + export/import SIRF EK ek karke (parallel export se AUTH_BYTES_INVALID aata hai)
-                async with setup_lock:
-                    try:
-                        chunk = await agen.__anext__()
-                    except StopAsyncIteration:
-                        chunk = None
-                while chunk is not None:
-                    os.pwrite(fd, chunk, (start + got) * CHUNK)
-                    got += 1
-                    state["done"] += len(chunk)
-                    await prog(min(state["done"], total), total, app_instance, step_name)
-                    try:
-                        chunk = await agen.__anext__()
-                    except StopAsyncIteration:
-                        chunk = None
-                if got >= count:
-                    return
-                check_flood()                      # flood ho to yahin ruk jao
-                raise Exception("range ruk gayi")
-            except (asyncio.CancelledError, FloodBlocked):
-                raise
-            except Exception as e:
-                attempt += 1
-                print(f"[range {idx}] retry {attempt} (got {got}/{count}): {e}", flush=True)
-                if attempt >= 4:
-                    raise Exception(f"download range {idx} failed: {e}")
-                await asyncio.sleep(3 * attempt)
-            finally:
-                try:
-                    await agen.aclose()
-                except Exception:
-                    pass
-
-    try:
-        workers = max(1, min(DL_WORKERS, n_chunks))
-        per = (n_chunks + workers - 1) // workers
-        ranges = [(i, i * per, min(per, n_chunks - i * per)) for i in range(workers) if i * per < n_chunks]
-        tasks = [asyncio.create_task(fetch_range(i, st, cnt)) for i, st, cnt in ranges]
-        t_par = time.time()
-        try:
-            await asyncio.gather(*tasks)
-        except BaseException:
-            for t in tasks:
-                t.cancel()
-            raise
-    finally:
-        os.close(fd)
-    if state["done"] < total:
-        raise Exception("fast download incomplete")
-    dt = max(time.time() - t_par, 0.001)
-    print(f"[diag] download done: {total/1048576/dt:.2f} MB/s avg | total time {time.time()-t_begin:.0f}s", flush=True)
-    await prog(total, total, app_instance, step_name)
-    return out_path
-
-
 async def download_tg_link(app_instance, link, output_path, step_name, min_size=1, show_progress=True):
-    global LAST_DL_ERROR
     if not is_set(link):
-        return None
-    msg_id = parse_msg_id(link)
-    if msg_id is None:
-        LAST_DL_ERROR = f"bad link: {link}"
-        print(f"Download: {LAST_DL_ERROR}")
         return None
     for attempt in (1, 2):
         try:
+            msg_id = int(link.split("/")[-1])
             msg = await app_instance.get_messages(CHAT_ID, msg_id)
-            if not (msg and (msg.document or msg.video or msg.photo or msg.animation or msg.audio)):
-                LAST_DL_ERROR = f"message {msg_id} me media nahi mila (ya bot is chat ka message dekh nahi pa raha)"
-                print(f"Download: {LAST_DL_ERROR}")
-                return None
-            if show_progress:
-                reset_prog()
-            downloaded = None
-            if show_progress and not output_path.endswith("/"):
-                try:
-                    downloaded = await asyncio.wait_for(
-                        fast_download(app_instance, msg, output_path, step_name), timeout=TRANSFER_TIMEOUT)
-                except FloodBlocked:
-                    raise
-                except Exception as e:
-                    print(f"Fast download failed ({e}); normal download use ho raha hai", flush=True)
-                    check_flood()
+            if msg and (msg.document or msg.video or msg.photo or msg.animation):
+                if show_progress:
                     reset_prog()
-            if not downloaded:
                 kw = dict(progress=prog, progress_args=(app_instance, step_name)) if show_progress else {}
                 downloaded = await asyncio.wait_for(
                     app_instance.download_media(msg, file_name=output_path, **kw), timeout=TRANSFER_TIMEOUT)
-            check_flood()
-            if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
-                return downloaded
-        except FloodBlocked:
-            raise
+                if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) >= min_size:
+                    return downloaded
+            else:
+                print(f"Download: message {msg_id} has no media")
+                return None
         except Exception as e:
-            LAST_DL_ERROR = f"{type(e).__name__}: {e}"
-            print(f"Download Exception (try {attempt}): {LAST_DL_ERROR}")
-            await asyncio.sleep(2)
+            print(f"Download Exception (try {attempt}): {e}")
     return None
 
 
@@ -731,35 +551,32 @@ async def extract_embedded_subs(video_file, base_name):
         return []
 
 
-# Quality settings (GitHub Actions env se bhi badal sakte ho: X264_PRESET / X264_CRF)
-X264_PRESET = os.getenv("X264_PRESET") or "veryfast"   # ultrafast = kharab quality, veryfast = clean + still fast
-X264_CRF = os.getenv("X264_CRF") or "23"               # chhota = better quality / bada size (22-26 best range)
-
-
 def pick_rate(effective_height):
-    """maxrate sirf SAFETY ceiling hai (heavy scenes me bitrate spike roke). Pehle bahut kam tha
-    (1600k @720p) -> CRF ko bitrate nahi milta tha -> blocks / video 'fat' jati thi."""
-    if effective_height >= 1080: return "5000k", "10000k"
-    if effective_height >= 720: return "3000k", "6000k"
-    if effective_height >= 480: return "1800k", "3600k"
-    return "1000k", "2000k"
+    if effective_height >= 1080: return "2200k", "4400k"
+    if effective_height >= 720: return "1600k", "3200k"
+    if effective_height >= 480: return "1000k", "2000k"
+    return "700k", "1400k"
 
 
-def build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size):
-    return [
+def build_ffmpeg_cmd(video_file, vf, out_name, max_rate=None, buf_size=None):
+    cmd = [
         "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
         "-i", video_file, "-vf", vf,
         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
-        "-c:v", "libx264", "-preset", X264_PRESET, "-crf", X264_CRF,
-        "-profile:v", "high", "-maxrate", max_rate, "-bufsize", buf_size,
-        "-x264-params", "aq-mode=3",          # dark scenes me blocks / banding kam
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+    ]
+    # bitrate cap sirf tab lagta hai jab max_rate/buf_size diye gaye ho (compress task)
+    if max_rate and buf_size:
+        cmd += ["-maxrate", max_rate, "-bufsize", buf_size]
+    cmd += [
         "-pix_fmt", "yuv420p", "-threads", "0",
         # keyframe every 2s (IDR) -> seeking anywhere in the player starts instantly
         "-force_key_frames", "expr:gte(t,n_forced*2)", "-forced-idr", "1",
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-af", "aresample=async=1:first_pts=0",
+        "-c:a", "aac", "-b:a", "96k", "-ac", "2",
         "-max_muxing_queue_size", "1024",
         "-movflags", "+faststart", out_name,
     ]
+    return cmd
 
 
 async def run_ffmpeg(cmd, duration, title):
@@ -779,7 +596,7 @@ async def run_ffmpeg(cmd, duration, title):
                 try:
                     percent = min((int(line_str.split("=")[1]) / 1000000.0 / duration) * 100, 100.0)
                     print(f"[encode] {percent:.1f}%", flush=True)
-                    bg(update_http_status(
+                    asyncio.create_task(update_http_status(
                         f"⚙️ <b>{title}</b>\n<code>{get_process_bar(percent)}</code> [{percent:.1f}%]"))
                 except Exception:
                     pass
@@ -803,47 +620,20 @@ async def main():
         "name": "worker_single_session",
         "api_id": API_ID,
         "api_hash": API_HASH,
-        "in_memory": True,
-        "workers": 4,
-        "max_concurrent_transmissions": 16,   # parallel download/upload ke liye
-        "sleep_threshold": 600,               # FloodWait 10 min tak ho to khud wait karke aage badhta hai
+        "workers": 16,
+        "max_concurrent_transmissions": 10,
         "no_updates": True,
     }
-
-    # Bot hi hai. Agar BOT_SESSION secret diya hai to bot ki saved login use hota hai (har run me naya
-    # login nahi hota = ImportBotAuthorization FloodWait nahi lagta). Nahi diya to seedha BOT_TOKEN se login.
-    if BOT_SESSION:
-        client_params["session_string"] = BOT_SESSION
+    if STRING_SESSION and STRING_SESSION.strip() != "":
+        client_params["session_string"] = STRING_SESSION.strip()
     else:
         client_params["bot_token"] = BOT_TOKEN
 
     app = Client(**client_params)
-    try:
-        await app.start()
-    except FloodWait as e:
-        msg = (f"Telegram ne bot ke LOGIN pe rok lagayi hai: {int(e.value)//60} min {int(e.value)%60}s wait. "
-               f"Itne der koi task mat chalao.")
-        print("ERROR:", msg, flush=True)
-        if is_set(TRIGGER_MSG_ID):
-            try:
-                status_msg_id = int(TRIGGER_MSG_ID)
-                _sync_http_edit(f"❌ <b>Execution Error:</b>\n<code>{html.escape(msg)}</code>", cancel=False)
-            except Exception:
-                pass
-        sys.exit(1)
-    except Exception as e:
-        if not BOT_SESSION:
-            raise
-        print(f"Saved session fail ({type(e).__name__}: {e}); BOT_TOKEN se login ho raha hai", flush=True)
-        client_params.pop("session_string", None)
-        client_params["bot_token"] = BOT_TOKEN
-        app = Client(**client_params)
-        await app.start()
+    await app.start()
 
-    try:
-        await app.get_chat(CHAT_ID)
-    except Exception as e:
-        print(f"get_chat({CHAT_ID}) failed: {type(e).__name__}: {e}", flush=True)
+    try: await app.get_chat(CHAT_ID)
+    except Exception: pass
 
     # Re-use the bot's "Task Dispatched..." message as the status message (saves a delete + a send).
     if is_set(TRIGGER_MSG_ID):
@@ -863,17 +653,21 @@ async def main():
         is_hardsub = TASK_TYPE == "hardsub"
         step_dl = "hardsub_download" if is_hardsub else "compress_download"
 
-        # ---- downloads: pehle chhoti files (sub/font), phir video ----
-        # (ek saath chalane se Telegram ka auth.ExportAuthorization FloodWait aa raha tha)
+        # ---- downloads: video starts right away, subtitle + font (tiny) fetched alongside ----
+        video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
         sub_file = font_path = None
-        if is_hardsub:
-            sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
-            if not sub_file:
-                raise Exception(f"Subtitle download failed. Reason: {LAST_DL_ERROR or 'unknown'}")
-        font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
-        video_file = await download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000)
+        try:
+            if is_hardsub:
+                sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
+                if not sub_file:
+                    raise Exception("Subtitle file not found or download failed.")
+            font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
+        except Exception:
+            video_task.cancel()
+            raise
+        video_file = await video_task
         if not video_file:
-            raise Exception(f"Video download failed. Reason: {LAST_DL_ERROR or 'unknown'}")
+            raise Exception("Video download failed or file is 0 bytes.")
 
         vid_width, vid_height, duration = get_video_dimensions_and_duration(video_file)
         if duration <= 0:
@@ -892,10 +686,10 @@ async def main():
         reso_clean = str(RESOLUTION or "").replace("p", "").replace("P", "").strip()
         has_reso = reso_clean.isdigit()
         effective_height = int(reso_clean) if has_reso else vid_height
-        max_rate, buf_size = pick_rate(effective_height)
+        # hardsub: koi bitrate cap nahi (sirf CRF 26). compress: pehle jaisa cap.
+        max_rate, buf_size = (None, None) if is_hardsub else pick_rate(effective_height)
         # (-2 keeps width even; min(...) never upscales; trunc keeps height even)
-        scale_stage = (f"scale=-2:'min({reso_clean},trunc(ih/2)*2)':flags=lanczos" if has_reso
-                       else "scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=lanczos")
+        scale_stage = f"scale=-2:'min({reso_clean},trunc(ih/2)*2)'" if has_reso else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
         extract_task = None
         if is_hardsub:
