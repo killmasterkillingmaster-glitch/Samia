@@ -53,6 +53,7 @@ pyrogram.utils.get_peer_type = lambda p: "channel" if str(p).startswith("-100") 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_SESSION = (os.getenv("BOT_SESSION") or "").strip()   # OPTIONAL: bot ki saved session (make_session.py se banti hai)
 TASK_TYPE = os.getenv("TASK_TYPE")
 VIDEO_ID = os.getenv("VIDEO_ID")
 SUB_ID = os.getenv("SUB_ID")
@@ -189,7 +190,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 90      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
+DLG_FONT_SIZE = 80      # style me bhi yehi use hota hai (pehle measure 80 aur style 90 tha -> 3 line ho jati thi)
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
@@ -502,8 +503,7 @@ def get_video_dimensions_and_duration(video_path):
 
 
 CHUNK = 1024 * 1024        # Telegram ka max chunk (1 MiB)
-PIECE_CHUNKS = 8           # har piece 8 MiB
-DL_WORKERS = int(os.getenv("DL_WORKERS") or 12)   # itne pieces ek saath download hote hain
+DL_WORKERS = int(os.getenv("DL_WORKERS") or 4)    # itne connections ek saath (har ek = 1 auth export, isliye zyada mat karo)
 
 
 LAST_DL_ERROR = ""
@@ -538,53 +538,55 @@ async def fast_download(app_instance, msg, out_path, step_name):
     fd = os.open(out_path, os.O_RDWR)
     state = {"done": 0}
 
-    async def fetch_piece(start, count):
+    setup_lock = asyncio.Lock()
+
+    async def fetch_range(idx, start, count):
+        """Ek worker = ek lamba continuous range = Pyrogram ka EK get_file call.
+        (Is Pyrogram version me har get_file call apna naya media session banata hai + auth.ExportAuthorization
+        karta hai. Pehle har 8MB piece pe call hoti thi = 170+ exports = FloodWait. Ab sirf DL_WORKERS exports.)"""
         got, attempt = 0, 0
-        while True:
+        while got < count:
+            agen = app_instance.stream_media(msg, offset=start + got, limit=count - got).__aiter__()
             try:
-                async for chunk in app_instance.stream_media(msg, offset=start + got, limit=count - got):
+                # session banana + export/import SIRF EK ek karke (parallel export se AUTH_BYTES_INVALID aata hai)
+                async with setup_lock:
+                    try:
+                        chunk = await agen.__anext__()
+                    except StopAsyncIteration:
+                        chunk = None
+                while chunk is not None:
                     os.pwrite(fd, chunk, (start + got) * CHUNK)
                     got += 1
                     state["done"] += len(chunk)
                     await prog(min(state["done"], total), total, app_instance, step_name)
+                    try:
+                        chunk = await agen.__anext__()
+                    except StopAsyncIteration:
+                        chunk = None
                 if got >= count:
                     return
-                check_flood()                      # flood ho to yahin ruk jao (retry = ban badhega)
-                raise Exception("short piece")
+                check_flood()                      # flood ho to yahin ruk jao
+                raise Exception("range ruk gayi")
             except (asyncio.CancelledError, FloodBlocked):
                 raise
-            except FloodWait as e:
-                wait = int(getattr(e, "value", 30)) + 1
-                print(f"FloodWait {wait}s (piece {start}) - wait kar raha hu", flush=True)
-                await asyncio.sleep(wait)          # flood retry count nahi hota
             except Exception as e:
                 attempt += 1
-                print(f"piece {start} retry {attempt}: {e}", flush=True)
-                if attempt >= 6:
-                    raise Exception(f"download piece {start} failed: {e}")
-                await asyncio.sleep(min(2 * attempt, 10))
+                print(f"[range {idx}] retry {attempt} (got {got}/{count}): {e}", flush=True)
+                if attempt >= 4:
+                    raise Exception(f"download range {idx} failed: {e}")
+                await asyncio.sleep(3 * attempt)
+            finally:
+                try:
+                    await agen.aclose()
+                except Exception:
+                    pass
 
     try:
-        # 1) Pehle SIRF 1 chunk: isse media connection + auth ek hi baar banta hai
-        #    (12 workers ek saath banate the -> auth.ExportAuthorization FloodWait aata tha)
-        await fetch_piece(0, 1)
-        print(f"[diag] first chunk done in {time.time()-t_begin:.1f}s (zyada ho to FloodWait/auth ka wait hai)", flush=True)
+        workers = max(1, min(DL_WORKERS, n_chunks))
+        per = (n_chunks + workers - 1) // workers
+        ranges = [(i, i * per, min(per, n_chunks - i * per)) for i in range(workers) if i * per < n_chunks]
+        tasks = [asyncio.create_task(fetch_range(i, st, cnt)) for i, st, cnt in ranges]
         t_par = time.time()
-
-        # 2) Ab baaki file parallel
-        queue = asyncio.Queue()
-        for st in range(1, n_chunks, PIECE_CHUNKS):
-            queue.put_nowait((st, min(PIECE_CHUNKS, n_chunks - st)))
-
-        async def worker():
-            while True:
-                try:
-                    st, cnt = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                await fetch_piece(st, cnt)
-
-        tasks = [asyncio.create_task(worker()) for _ in range(DL_WORKERS)]
         try:
             await asyncio.gather(*tasks)
         except BaseException:
@@ -596,7 +598,7 @@ async def fast_download(app_instance, msg, out_path, step_name):
     if state["done"] < total:
         raise Exception("fast download incomplete")
     dt = max(time.time() - t_par, 0.001)
-    print(f"[diag] parallel part: {(total-CHUNK)/1048576/dt:.2f} MB/s | total time {time.time()-t_begin:.0f}s", flush=True)
+    print(f"[diag] download done: {total/1048576/dt:.2f} MB/s avg | total time {time.time()-t_begin:.0f}s", flush=True)
     await prog(total, total, app_instance, step_name)
     return out_path
 
@@ -801,7 +803,6 @@ async def main():
         "name": "worker_single_session",
         "api_id": API_ID,
         "api_hash": API_HASH,
-        "bot_token": BOT_TOKEN,           # sirf bot token (string session use nahi hota)
         "in_memory": True,
         "workers": 4,
         "max_concurrent_transmissions": 16,   # parallel download/upload ke liye
@@ -809,8 +810,35 @@ async def main():
         "no_updates": True,
     }
 
+    # Bot hi hai. Agar BOT_SESSION secret diya hai to bot ki saved login use hota hai (har run me naya
+    # login nahi hota = ImportBotAuthorization FloodWait nahi lagta). Nahi diya to seedha BOT_TOKEN se login.
+    if BOT_SESSION:
+        client_params["session_string"] = BOT_SESSION
+    else:
+        client_params["bot_token"] = BOT_TOKEN
+
     app = Client(**client_params)
-    await app.start()
+    try:
+        await app.start()
+    except FloodWait as e:
+        msg = (f"Telegram ne bot ke LOGIN pe rok lagayi hai: {int(e.value)//60} min {int(e.value)%60}s wait. "
+               f"Itne der koi task mat chalao.")
+        print("ERROR:", msg, flush=True)
+        if is_set(TRIGGER_MSG_ID):
+            try:
+                status_msg_id = int(TRIGGER_MSG_ID)
+                _sync_http_edit(f"❌ <b>Execution Error:</b>\n<code>{html.escape(msg)}</code>", cancel=False)
+            except Exception:
+                pass
+        sys.exit(1)
+    except Exception as e:
+        if not BOT_SESSION:
+            raise
+        print(f"Saved session fail ({type(e).__name__}: {e}); BOT_TOKEN se login ho raha hai", flush=True)
+        client_params.pop("session_string", None)
+        client_params["bot_token"] = BOT_TOKEN
+        app = Client(**client_params)
+        await app.start()
 
     try:
         await app.get_chat(CHAT_ID)
