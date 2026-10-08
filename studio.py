@@ -135,7 +135,7 @@ def inject_watermark(text, duration):
 # and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
-DLG_FONT_SIZE = 80
+DLG_FONT_SIZE = 75
 DLG_OUTLINE = 4.5
 DLG_SHADOW = 3.5
 DLG_MARGIN_V = 70
@@ -283,10 +283,20 @@ def _ass_cues(text):
             if low.startswith("format:"):
                 fmt = [x.strip().lower() for x in s[7:].split(",")]
             elif low.startswith("dialogue:") and fmt:
-                parts = s.split(":", 1)[1].lstrip().split(",", len(fmt) - 1)
+                body = s.split(":", 1)[1].lstrip()
+                parts = body.split(",", len(fmt) - 1)
                 if len(parts) < len(fmt):
-                    continue
-                d = dict(zip(fmt, parts))
+                    # Kuch tools Format me 10 field likhte hain par Dialogue me sirf
+                    # Layer,Start,End,Style,Name,Text (6) bhejte hain -> alag se parse karo.
+                    p = body.split(",", 5)
+                    if len(p) == 6:
+                        d = dict(zip(["layer", "start", "end", "style", "name", "text"], p))
+                    elif len(p) == 5:
+                        d = dict(zip(["layer", "start", "end", "style", "text"], p))
+                    else:
+                        continue
+                else:
+                    d = dict(zip(fmt, parts))
                 txt = d.get("text", "")
                 if re.search(r"(watermark|logo|credit)", d.get("style", ""), re.I):
                     continue
@@ -558,13 +568,16 @@ def pick_rate(effective_height):
     return "700k", "1400k"
 
 
-def build_ffmpeg_cmd(video_file, vf, out_name, max_rate=None, buf_size=None):
+def build_ffmpeg_cmd(video_file, vf, out_name, max_rate=None, buf_size=None, preset="ultrafast", crf="26",
+                     target_rate=None):
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
         "-i", video_file, "-vf", vf,
         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+        "-c:v", "libx264", "-preset", preset,
     ]
+    # target_rate diya ho to bitrate fix (size source ke barabar), warna CRF (quality-based)
+    cmd += ["-b:v", target_rate] if target_rate else ["-crf", crf]
     # bitrate cap sirf tab lagta hai jab max_rate/buf_size diye gaye ho (compress task)
     if max_rate and buf_size:
         cmd += ["-maxrate", max_rate, "-bufsize", buf_size]
@@ -686,8 +699,20 @@ async def main():
         reso_clean = str(RESOLUTION or "").replace("p", "").replace("P", "").strip()
         has_reso = reso_clean.isdigit()
         effective_height = int(reso_clean) if has_reso else vid_height
-        # hardsub: koi bitrate cap nahi (sirf CRF 26). compress: pehle jaisa cap.
-        max_rate, buf_size = (None, None) if is_hardsub else pick_rate(effective_height)
+        if is_hardsub:
+            # Hardsub: quality high (CRF 19, veryfast) + size source ke ~115% se upar nahi jaaye
+            # (300 MB source -> max ~345-350 MB). Cap source ke apne bitrate se nikalta hai.
+            # CRF size guarantee nahi deta (simple scenes me bahut chhota ho jaata hai),
+            # isliye target bitrate = source ka bitrate (audio hata ke). Size ~source ke barabar.
+            src_kbps = os.path.getsize(video_file) * 8 / duration / 1000
+            tgt_kbps = max(600, int(src_kbps - 96))
+            target_rate = f"{tgt_kbps}k"
+            max_rate, buf_size = f"{int(tgt_kbps * 1.5)}k", f"{tgt_kbps * 3}k"
+            enc_preset, enc_crf = "ultrafast", "19"   # speed ke liye ultrafast; size target_rate se fix
+        else:
+            target_rate = None
+            max_rate, buf_size = pick_rate(effective_height)
+            enc_preset, enc_crf = "ultrafast", "26"
         # (-2 keeps width even; min(...) never upscales; trunc keeps height even)
         scale_stage = f"scale=-2:'min({reso_clean},trunc(ih/2)*2)'" if has_reso else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
@@ -704,7 +729,7 @@ async def main():
             extract_task = asyncio.create_task(extract_embedded_subs(video_file, base_name))
 
         await update_http_status(f"⚙️ <b>{title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
-        await run_ffmpeg(build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size), duration, title)
+        await run_ffmpeg(build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size, enc_preset, enc_crf, target_rate), duration, title)
 
         # ---- upload (as document) ----
         await update_http_status(f"📤 <b>Sending Video</b>\n<code>{get_send_bar(0)}</code> [0.0%]")
