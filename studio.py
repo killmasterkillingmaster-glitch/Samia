@@ -17,9 +17,14 @@ SUB_ID = os.getenv("SUB_ID")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 RESOLUTION = os.getenv("RESOLUTION")
 RENAME = os.getenv("RENAME")
-FONT_LINK = os.getenv("FONT_LINK")
 TRIGGER_MSG_ID = os.getenv("TRIGGER_MSG_ID")
 RUN_ID = (os.getenv("GITHUB_RUN_ID") or "").strip()   # set automatically by GitHub Actions
+
+# ---------------------------------------------------------
+# HARDSUB FONT: repo ke is folder se aata hai (Telegram se nahi)
+# ---------------------------------------------------------
+FONT_DIR = "fonts"                 # repo me folder ka naam (studio.py ke bagal me)
+PREFERRED_FONT = "RoundSub-Bold.ttf"  # pehle ye file dhundhega, na mile to folder ki pehli font file
 
 _user_id_raw = os.getenv("USER_ID")
 USER_ID = int(_user_id_raw) if _user_id_raw and _user_id_raw.strip().lower() != "none" else CHAT_ID
@@ -33,7 +38,6 @@ TRANSFER_TIMEOUT = 2400
 last_time = 0
 start_time = 0
 status_msg_id = None
-os.makedirs("fonts", exist_ok=True)
 
 
 def is_set(v):
@@ -130,18 +134,18 @@ def inject_watermark(text, duration):
 
 # =========================================================
 # SUBTITLE HELPERS
-# Dialogue ALWAYS uses the bot's own style (subtitle file ka style / tags ignore),
-# same look as the Colab bot: Arial Bold, white, black outline, bottom centre,
-# and never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
+# Dialogue ALWAYS uses the bot's own style (subtitle file ka style / tags ignore).
+# Hardsub me font repo ke FONT_DIR folder se aata hai.
+# Never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
 # Dialogue style (measuring/wrap aur asli ASS style dono yahi values use karte hain)
-DLG_FONT_SIZE = 82
-DLG_OUTLINE = 7
-DLG_SHADOW = 4
+DLG_FONT_SIZE = 80
+DLG_OUTLINE = 5
+DLG_SHADOW = 2
 DLG_MARGIN_V = 60
 DLG_MARGIN_LR = 40
-DLG_SCALE_X = 94
+DLG_SCALE_X = 90
 DLG_SPACING = 1
 DLG_FAKE_BOLD = False   # True karo to text aur bhaari dikhega (extra white-border layer)
 
@@ -160,6 +164,22 @@ def read_text_any(path):
 
 def is_ass_text(text):
     return bool(re.search(r"\[Script Info\]|\[V4\+?\s*Styles\]|\[Events\]", text[:6000], re.I))
+
+
+def find_repo_font():
+    """Repo ke FONT_DIR folder se font file. PREFERRED_FONT mile to wahi, warna pehli .ttf/.otf/.ttc."""
+    if not os.path.isdir(FONT_DIR):
+        print(f"Font folder '{FONT_DIR}' not found in repo")
+        return None
+    files = sorted(os.listdir(FONT_DIR))
+    for f in files:
+        if f.lower() == PREFERRED_FONT.lower():
+            return os.path.join(FONT_DIR, f)
+    for f in files:
+        if f.lower().endswith((".ttf", ".otf", ".ttc")):
+            return os.path.join(FONT_DIR, f)
+    print(f"No font file inside '{FONT_DIR}'")
+    return None
 
 
 def _find_measure_font(custom_path=None):
@@ -358,125 +378,16 @@ def prepare_subtitle(sub_file, font_name, custom_font, duration, out_path="ready
 
 
 def get_font_name(font_path):
+    """Family name (nameID 1) pehle, na mile to full name (nameID 4). libass family name se match karta hai."""
     try:
         font = TTFont(font_path, fontNumber=0)
-        for record in font["name"].names:
-            if record.nameID == 4:
-                return record.toUnicode()
+        for want in (1, 4):
+            for record in font["name"].names:
+                if record.nameID == want:
+                    return record.toUnicode()
     except Exception:
         pass
     return "Arial"
-
-
-# =========================================================
-# SOFTSUB (stream copy: no re-encode, size same, very fast)
-# Styles / watermark / positions sab user ki .ass file me hote hain -- code unko nahi badalta.
-# Sirf ek kaam: lambe (static) events ko chhote tukdon me todta hai, taaki video aage-peeche
-# karne par subtitles / watermark gayab na ho (player seek ke baad sirf wahi events dekhta hai
-# jo seek-point ke baad start hote hain; ek lamba event beech me kat jaata hai).
-# =========================================================
-SOFT_CHUNK_SEC = 1.0     # har event max itna lamba (seek ke baad worst-case itni der ka gap)
-# animation wale events (fade / move / \t / karaoke) todne se animation toot jaati hai -> unhe nahi todte
-_NO_SPLIT_RE = re.compile(r"\\(?:t\(|move|fade?[(\d]|[kK][fot]?\d)")
-
-
-def _ass_to_cs(t):
-    m = re.match(r"^\s*(\d+):(\d{1,2}):(\d{1,2})[.:](\d{1,3})\s*$", t)
-    if not m:
-        return None
-    h, mi, s, f = m.groups()
-    return int(h) * 360000 + int(mi) * 6000 + int(s) * 100 + int(round(int(f) / 10 ** len(f) * 100))
-
-
-def _cs_to_ass(cs):
-    h, rem = divmod(max(0, int(cs)), 360000)
-    m, rem = divmod(rem, 6000)
-    s, c = divmod(rem, 100)
-    return f"{h}:{m:02d}:{s:02d}.{c:02d}"
-
-
-def make_seek_safe_ass(text, duration):
-    """ASS text -> same ASS, but long static events are cut into SOFT_CHUNK_SEC pieces
-    (cut points sit on a fixed 1-second grid). Header / styles / [Fonts] untouched."""
-    chunk = max(10, int(SOFT_CHUNK_SEC * 100))
-    limit = int((duration + 2) * 100)          # video ke baad ke events ki zarurat nahi
-    out, sec, fmt = [], None, None
-    for raw in text.split("\n"):
-        s = raw.strip()
-        low = s.lower()
-        if s.startswith("[") and s.endswith("]"):
-            sec, fmt = low, None
-            out.append(raw)
-            continue
-        if sec != "[events]":
-            out.append(raw)
-            continue
-        if low.startswith("format:"):
-            fmt = [x.strip().lower() for x in s[7:].split(",")]
-            out.append(raw)
-            continue
-        if not low.startswith("dialogue:") or not fmt:
-            continue                              # Events ke andar comment / khaali lines hata do
-        body = s.split(":", 1)[1].lstrip()
-        parts = body.split(",", len(fmt) - 1)
-        if len(parts) == len(fmt) and {"start", "end", "text"} <= set(fmt):
-            si, ei, ti = fmt.index("start"), fmt.index("end"), fmt.index("text")
-        else:
-            parts = body.split(",", 5)            # 6-field Dialogue (Layer,Start,End,Style,Name,Text)
-            si, ei, ti = 1, 2, 5
-            if len(parts) < 6:
-                out.append(raw)
-                continue
-        a, b = _ass_to_cs(parts[si]), _ass_to_cs(parts[ei])
-        if a is None or b is None or b <= a:
-            out.append(raw)
-            continue
-        if _NO_SPLIT_RE.search(parts[ti]) or (b - a) <= chunk and b <= limit:
-            out.append(raw)
-            continue
-        if a >= limit:
-            continue
-        b = min(b, limit)
-        cut = a
-        while cut < b:
-            nxt = min(b, (cut // chunk + 1) * chunk)
-            p = list(parts)
-            p[si], p[ei] = _cs_to_ass(cut), _cs_to_ass(nxt)
-            out.append("Dialogue: " + ",".join(p))
-            cut = nxt
-    return "\n".join(out)
-
-
-def prepare_softsub(sub_file, duration, out_path="soft_sub.ass"):
-    text = read_text_any(sub_file).replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff")
-    if not (sub_file.lower().endswith((".ass", ".ssa")) or is_ass_text(text)):
-        # srt / vtt -> ass (ffmpeg ke default style me; apna style chahiye to .ass bhejo)
-        ext = ".vtt" if text.lstrip().upper().startswith("WEBVTT") else ".srt"
-        with open("conv_in" + ext, "w", encoding="utf-8") as f:
-            f.write(text)
-        subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", "conv_in" + ext, "conv_out.ass"],
-                       capture_output=True, timeout=60)
-        if not os.path.exists("conv_out.ass"):
-            raise Exception("Subtitle file convert nahi ho payi (srt/vtt/ass bhejo).")
-        text = read_text_any("conv_out.ass").replace("\r\n", "\n")
-    if "[events]" not in text.lower():
-        raise Exception("Subtitle file me [Events] section nahi mila.")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(make_seek_safe_ass(text, duration))
-    return out_path
-
-
-def build_softsub_cmd(video_file, ass_path, out_name, font_path=None):
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
-        "-i", video_file, "-i", ass_path,
-        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
-        "-c", "copy", "-disposition:s:0", "default",
-    ]
-    if font_path and os.path.exists(font_path):
-        mime = "application/vnd.ms-opentype" if font_path.lower().endswith(".otf") else "application/x-truetype-font"
-        cmd += ["-attach", font_path, "-metadata:s:t:0", f"mimetype={mime}"]
-    return cmd + [out_name]
 
 
 # =========================================================
@@ -784,19 +695,17 @@ async def main():
 
     try:
         is_hardsub = TASK_TYPE == "hardsub"
-        is_softsub = TASK_TYPE == "softsub"
-        needs_sub = is_hardsub or is_softsub
-        step_dl = "hardsub_download" if needs_sub else "compress_download"
+        step_dl = "hardsub_download" if is_hardsub else "compress_download"
 
-        # ---- downloads: video starts right away, subtitle + font (tiny) fetched alongside ----
+        # ---- downloads: video starts right away, subtitle (tiny) fetched alongside ----
+        # Font Telegram se nahi aata: hardsub ke time repo ke FONT_DIR folder se liya jaata hai.
         video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
-        sub_file = font_path = None
+        sub_file = None
         try:
-            if needs_sub:
+            if is_hardsub:
                 sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
                 if not sub_file:
                     raise Exception("Subtitle file not found or download failed.")
-            font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
         except Exception:
             video_task.cancel()
             raise
@@ -812,54 +721,47 @@ async def main():
         if is_set(RENAME):
             base_name = RENAME.rsplit(".", 1)[0] if "." in RENAME else RENAME
         base_name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", base_name).strip()[:120] or "output"
-        out_name = f"{base_name}.mkv" if is_softsub else f"{base_name}.mp4"   # ASS soft-sub ke liye mkv
+        out_name = f"{base_name}.mp4"
 
-        custom_font = bool(font_path) and font_path.lower().endswith((".ttf", ".otf", ".ttc"))
+        font_path = find_repo_font() if is_hardsub else None
+        custom_font = bool(font_path)
         font_name = get_font_name(font_path) if custom_font else "Arial"
+        if is_hardsub:
+            print(f"Hardsub font: {font_path} -> family '{font_name}'", flush=True)
 
-        if is_softsub:
-            # ---- SOFTSUB: -c copy (re-encode nahi) -> size same, bahut fast ----
-            title = "Adding Softsub"
-            ass_path = prepare_softsub(sub_file, duration)
-            await update_http_status(f"⚙️ <b>{title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
-            await run_ffmpeg(build_softsub_cmd(video_file, ass_path, out_name, font_path if custom_font else None), duration, title)
-            extract_task = None
+        # ---- resolution / bitrate bucket ----
+        reso_clean = str(RESOLUTION or "").replace("p", "").replace("P", "").strip()
+        has_reso = reso_clean.isdigit()
+        effective_height = int(reso_clean) if has_reso else vid_height
+        if is_hardsub:
+            # CRF size guarantee nahi deta (simple scenes me bahut chhota ho jaata hai),
+            # isliye target bitrate = source ka bitrate (audio hata ke). Size ~source ke barabar.
+            src_kbps = os.path.getsize(video_file) * 8 / duration / 1000
+            tgt_kbps = max(600, int(src_kbps - 96))
+            target_rate = f"{tgt_kbps}k"
+            max_rate, buf_size = f"{int(tgt_kbps * 1.5)}k", f"{tgt_kbps * 3}k"
+            enc_preset, enc_crf = "ultrafast", "19"   # speed ke liye ultrafast; size target_rate se fix
         else:
-            # ---- resolution / bitrate bucket ----
-            reso_clean = str(RESOLUTION or "").replace("p", "").replace("P", "").strip()
-            has_reso = reso_clean.isdigit()
-            effective_height = int(reso_clean) if has_reso else vid_height
-            if is_hardsub:
-                # Hardsub: quality high (CRF 19, veryfast) + size source ke ~115% se upar nahi jaaye
-                # (300 MB source -> max ~345-350 MB). Cap source ke apne bitrate se nikalta hai.
-                # CRF size guarantee nahi deta (simple scenes me bahut chhota ho jaata hai),
-                # isliye target bitrate = source ka bitrate (audio hata ke). Size ~source ke barabar.
-                src_kbps = os.path.getsize(video_file) * 8 / duration / 1000
-                tgt_kbps = max(600, int(src_kbps - 96))
-                target_rate = f"{tgt_kbps}k"
-                max_rate, buf_size = f"{int(tgt_kbps * 1.5)}k", f"{tgt_kbps * 3}k"
-                enc_preset, enc_crf = "ultrafast", "19"   # speed ke liye ultrafast; size target_rate se fix
-            else:
-                target_rate = None
-                max_rate, buf_size = pick_rate(effective_height)
-                enc_preset, enc_crf = "ultrafast", "26"
-            # (-2 keeps width even; min(...) never upscales; trunc keeps height even)
-            scale_stage = f"scale=-2:'min({reso_clean},trunc(ih/2)*2)'" if has_reso else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+            target_rate = None
+            max_rate, buf_size = pick_rate(effective_height)
+            enc_preset, enc_crf = "ultrafast", "26"
+        # (-2 keeps width even; min(...) never upscales; trunc keeps height even)
+        scale_stage = f"scale=-2:'min({reso_clean},trunc(ih/2)*2)'" if has_reso else "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
-            extract_task = None
-            if is_hardsub:
-                prepare_subtitle(sub_file, font_name, custom_font, duration, font_path=font_path)
-                vf = f"{scale_stage},subtitles='ready_sub.ass':charenc=UTF-8"
-                if custom_font:
-                    vf += ":fontsdir=fonts"
-                title = "Encoding Hardsub"
-            else:
-                vf = scale_stage
-                title = "Compressing Video"
-                extract_task = asyncio.create_task(extract_embedded_subs(video_file, base_name))
+        extract_task = None
+        if is_hardsub:
+            prepare_subtitle(sub_file, font_name, custom_font, duration, font_path=font_path)
+            vf = f"{scale_stage},subtitles='ready_sub.ass':charenc=UTF-8"
+            if custom_font:
+                vf += f":fontsdir={FONT_DIR}"
+            title = "Encoding Hardsub"
+        else:
+            vf = scale_stage
+            title = "Compressing Video"
+            extract_task = asyncio.create_task(extract_embedded_subs(video_file, base_name))
 
-            await update_http_status(f"⚙️ <b>{title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
-            await run_ffmpeg(build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size, enc_preset, enc_crf, target_rate), duration, title)
+        await update_http_status(f"⚙️ <b>{title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
+        await run_ffmpeg(build_ffmpeg_cmd(video_file, vf, out_name, max_rate, buf_size, enc_preset, enc_crf, target_rate), duration, title)
 
         # ---- upload (as document) ----
         await update_http_status(f"📤 <b>Sending Video</b>\n<code>{get_send_bar(0)}</code> [0.0%]")
