@@ -17,14 +17,9 @@ SUB_ID = os.getenv("SUB_ID")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 RESOLUTION = os.getenv("RESOLUTION")
 RENAME = os.getenv("RENAME")
+FONT_LINK = os.getenv("FONT_LINK")
 TRIGGER_MSG_ID = os.getenv("TRIGGER_MSG_ID")
 RUN_ID = (os.getenv("GITHUB_RUN_ID") or "").strip()   # set automatically by GitHub Actions
-
-# ---------------------------------------------------------
-# HARDSUB FONT: repo ke is folder se aata hai (Telegram se nahi)
-# ---------------------------------------------------------
-FONT_DIR = "fonts"                 # repo me folder ka naam (studio.py ke bagal me)
-PREFERRED_FONT = "RoundSub-Bold.ttf"  # pehle ye file dhundhega, na mile to folder ki pehli font file
 
 _user_id_raw = os.getenv("USER_ID")
 USER_ID = int(_user_id_raw) if _user_id_raw and _user_id_raw.strip().lower() != "none" else CHAT_ID
@@ -35,9 +30,21 @@ CANCEL_DATA = f"cancel_{RUN_ID}_{USER_ID}" if RUN_ID else "cancel_active_run"
 DESK_CHANNEL_ID = -1003700822969
 TRANSFER_TIMEOUT = 2400
 
+# ---- Channel promo (video ke shuru ke 9 second tak upar-beech me dikhega) ----
+CHANNEL_LINK = "https://t.me/asi_anime"
+CHANNEL_BANNER_SECONDS = 9
+CHANNEL_BANNER_TEXT = ("{\\c&H00D7FF&}Join Official Channel\\N"
+                       "{\\c&HFFFFFF&}" + CHANNEL_LINK)
+
+# ---- Repo me rakha hua font (RoundSub-Bold.ttf) ----
+# Repo me `font/` naam ka folder banao aur usme .ttf file daalo.
+# User Telegram se apna font bheje to wahi use hoga, warna ye bundled font.
+BUNDLED_FONT_DIR = "font"
+
 last_time = 0
 start_time = 0
 status_msg_id = None
+os.makedirs("fonts", exist_ok=True)
 
 
 def is_set(v):
@@ -134,18 +141,18 @@ def inject_watermark(text, duration):
 
 # =========================================================
 # SUBTITLE HELPERS
-# Dialogue ALWAYS uses the bot's own style (subtitle file ka style / tags ignore).
-# Hardsub me font repo ke FONT_DIR folder se aata hai.
-# Never more than 2 lines (long lines get a slightly smaller font instead of a 3rd line).
+# Dialogue ALWAYS uses the bot's own style (subtitle file ka style / tags ignore),
+# bottom centre, white text, black outline, and never more than 2 lines
+# (long lines get a slightly smaller font instead of a 3rd line).
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
 # Dialogue style (measuring/wrap aur asli ASS style dono yahi values use karte hain)
-DLG_FONT_SIZE = 80
-DLG_OUTLINE = 5
-DLG_SHADOW = 2
+DLG_FONT_SIZE = 82
+DLG_OUTLINE = 7
+DLG_SHADOW = 5          # pehle 4 tha -> thoda bada shadow (zyada se zyada 6 tak rakho)
 DLG_MARGIN_V = 60
 DLG_MARGIN_LR = 40
-DLG_SCALE_X = 90
+DLG_SCALE_X = 94        # Arial/custom font ke liye; bundled RoundSub font me main() isse 100 kar deta hai
 DLG_SPACING = 1
 DLG_FAKE_BOLD = False   # True karo to text aur bhaari dikhega (extra white-border layer)
 
@@ -164,22 +171,6 @@ def read_text_any(path):
 
 def is_ass_text(text):
     return bool(re.search(r"\[Script Info\]|\[V4\+?\s*Styles\]|\[Events\]", text[:6000], re.I))
-
-
-def find_repo_font():
-    """Repo ke FONT_DIR folder se font file. PREFERRED_FONT mile to wahi, warna pehli .ttf/.otf/.ttc."""
-    if not os.path.isdir(FONT_DIR):
-        print(f"Font folder '{FONT_DIR}' not found in repo")
-        return None
-    files = sorted(os.listdir(FONT_DIR))
-    for f in files:
-        if f.lower() == PREFERRED_FONT.lower():
-            return os.path.join(FONT_DIR, f)
-    for f in files:
-        if f.lower().endswith((".ttf", ".otf", ".ttc")):
-            return os.path.join(FONT_DIR, f)
-    print(f"No font file inside '{FONT_DIR}'")
-    return None
 
 
 def _find_measure_font(custom_path=None):
@@ -335,7 +326,7 @@ def _ass_cues(text):
     return cues
 
 
-def build_dialogue_ass(cues, font_name, bold, meter):
+def build_dialogue_ass(cues, font_name, bold, meter, banner_end=CHANNEL_BANNER_SECONDS):
     font_name = (font_name or "Arial").replace(",", " ")
     head = (
         "[Script Info]\nScriptType: v4.00+\n"
@@ -348,7 +339,9 @@ def build_dialogue_ass(cues, font_name, bold, meter):
         f"Style: Default,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,{DLG_SCALE_X},100,{DLG_SPACING},0,1,{DLG_OUTLINE},{DLG_SHADOW},2,{DLG_MARGIN_LR},{DLG_MARGIN_LR},{DLG_MARGIN_V},1\n"
         f"Style: Italic,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,-1,0,0,{DLG_SCALE_X},100,{DLG_SPACING},0,1,{DLG_OUTLINE},{DLG_SHADOW},2,{DLG_MARGIN_LR},{DLG_MARGIN_LR},{DLG_MARGIN_V},1\n"
         f"Style: Flashback,{font_name},{DLG_FONT_SIZE},&H00FFFFFF,&H000000FF,&H00505050,&H00505050,-1,0,0,0,{DLG_SCALE_X},100,{DLG_SPACING},0,1,{DLG_OUTLINE},{DLG_SHADOW},2,{DLG_MARGIN_LR},{DLG_MARGIN_LR},{DLG_MARGIN_V},1\n"
-        f"Style: Signs,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,20,1\n\n"
+        f"Style: Signs,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,3,0,8,10,10,20,1\n"
+        # channel promo: upar-beech (alignment 8), 9 second ke liye
+        f"Style: Channel,{font_name},52,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,1,0,1,5,3,8,40,40,40,1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     events = []
@@ -360,6 +353,9 @@ def build_dialogue_ass(cues, font_name, bold, meter):
                 events.append(f"Dialogue: 1,{start},{end},Default,,0,0,0,,{{\\bord1.6\\3c&HFFFFFF&\\shad0}}{t}")
     if not events:
         raise Exception("Subtitle file me koi valid dialogue nahi mila.")
+    if banner_end and banner_end > 0.5:
+        events.append(f"Dialogue: 5,{sec_to_ass_time(0)},{sec_to_ass_time(banner_end)},Channel,,0,0,0,,"
+                      f"{{\\fad(300,500)}}{CHANNEL_BANNER_TEXT}")
     return head + "\n".join(events) + "\n"
 
 
@@ -370,7 +366,8 @@ def prepare_subtitle(sub_file, font_name, custom_font, duration, out_path="ready
     else:
         cues = _srt_vtt_cues(text)
     meter = TextMeter(_find_measure_font(font_path if custom_font else None))
-    ass = build_dialogue_ass(cues, font_name, bold=not custom_font, meter=meter)
+    ass = build_dialogue_ass(cues, font_name, bold=not custom_font, meter=meter,
+                             banner_end=min(CHANNEL_BANNER_SECONDS, duration))
     ass = inject_watermark(ass, duration)     # watermark code untouched
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(ass)
@@ -378,16 +375,39 @@ def prepare_subtitle(sub_file, font_name, custom_font, duration, out_path="ready
 
 
 def get_font_name(font_path):
-    """Family name (nameID 1) pehle, na mile to full name (nameID 4). libass family name se match karta hai."""
     try:
         font = TTFont(font_path, fontNumber=0)
-        for want in (1, 4):
+        for record in font["name"].names:
+            if record.nameID == 4:
+                return record.toUnicode()
+    except Exception:
+        pass
+    return "Arial"
+
+
+def get_family_name(font_path):
+    """Font ka family naam (jaise 'RoundSub') - ASS Fontname ke liye sabse safe."""
+    try:
+        font = TTFont(font_path, fontNumber=0)
+        for nid in (16, 1):
             for record in font["name"].names:
-                if record.nameID == want:
+                if record.nameID == nid:
                     return record.toUnicode()
     except Exception:
         pass
     return "Arial"
+
+
+def find_bundled_font():
+    """Repo ke `font/` folder se pehli .ttf/.otf file."""
+    try:
+        if os.path.isdir(BUNDLED_FONT_DIR):
+            for f in sorted(os.listdir(BUNDLED_FONT_DIR)):
+                if f.lower().endswith((".ttf", ".otf")):
+                    return os.path.join(BUNDLED_FONT_DIR, f)
+    except Exception:
+        pass
+    return None
 
 
 # =========================================================
@@ -658,7 +678,7 @@ async def run_ffmpeg(cmd, duration, title):
 # MAIN
 # =========================================================
 async def main():
-    global status_msg_id
+    global status_msg_id, DLG_SCALE_X
 
     client_params = {
         "name": "worker_single_session",
@@ -697,15 +717,15 @@ async def main():
         is_hardsub = TASK_TYPE == "hardsub"
         step_dl = "hardsub_download" if is_hardsub else "compress_download"
 
-        # ---- downloads: video starts right away, subtitle (tiny) fetched alongside ----
-        # Font Telegram se nahi aata: hardsub ke time repo ke FONT_DIR folder se liya jaata hai.
+        # ---- downloads: video starts right away, subtitle + font (tiny) fetched alongside ----
         video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
-        sub_file = None
+        sub_file = font_path = None
         try:
             if is_hardsub:
                 sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
                 if not sub_file:
                     raise Exception("Subtitle file not found or download failed.")
+            font_path = await download_tg_link(app, FONT_LINK, "fonts/", "font", show_progress=False)
         except Exception:
             video_task.cancel()
             raise
@@ -723,17 +743,27 @@ async def main():
         base_name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", base_name).strip()[:120] or "output"
         out_name = f"{base_name}.mp4"
 
-        font_path = find_repo_font() if is_hardsub else None
-        custom_font = bool(font_path)
-        font_name = get_font_name(font_path) if custom_font else "Arial"
-        if is_hardsub:
-            print(f"Hardsub font: {font_path} -> family '{font_name}'", flush=True)
+        # ---- font: user ka Telegram font pehle, warna repo ka bundled RoundSub font, warna Arial ----
+        custom_font = bool(font_path) and font_path.lower().endswith((".ttf", ".otf", ".ttc"))
+        fonts_dir = "fonts"
+        if custom_font:
+            font_name = get_font_name(font_path)
+        else:
+            font_name = "Arial"
+            bundled = find_bundled_font()
+            if bundled:
+                custom_font, font_path, fonts_dir = True, bundled, BUNDLED_FONT_DIR
+                font_name = get_family_name(bundled)
+                DLG_SCALE_X = 100        # font pehle se condensed hai, extra squeeze nahi
+                print(f"Using bundled font: {bundled} ({font_name})", flush=True)
 
         # ---- resolution / bitrate bucket ----
         reso_clean = str(RESOLUTION or "").replace("p", "").replace("P", "").strip()
         has_reso = reso_clean.isdigit()
         effective_height = int(reso_clean) if has_reso else vid_height
         if is_hardsub:
+            # Hardsub: quality high (CRF 19, veryfast) + size source ke ~115% se upar nahi jaaye
+            # (300 MB source -> max ~345-350 MB). Cap source ke apne bitrate se nikalta hai.
             # CRF size guarantee nahi deta (simple scenes me bahut chhota ho jaata hai),
             # isliye target bitrate = source ka bitrate (audio hata ke). Size ~source ke barabar.
             src_kbps = os.path.getsize(video_file) * 8 / duration / 1000
@@ -753,7 +783,7 @@ async def main():
             prepare_subtitle(sub_file, font_name, custom_font, duration, font_path=font_path)
             vf = f"{scale_stage},subtitles='ready_sub.ass':charenc=UTF-8"
             if custom_font:
-                vf += f":fontsdir={FONT_DIR}"
+                vf += f":fontsdir={fonts_dir}"
             title = "Encoding Hardsub"
         else:
             vf = scale_stage
@@ -766,7 +796,7 @@ async def main():
         # ---- upload (as document) ----
         await update_http_status(f"📤 <b>Sending Video</b>\n<code>{get_send_bar(0)}</code> [0.0%]")
         await deliver_video_asset(app, CHAT_ID, USER_ID, out_name,
-                                  f"✅ <b>Process Completed!</b>\n<code>{html.escape(out_name)}</code>", prog)
+                                  f"✅ <b>Process Completed!</b>\n<code>{html.escape(out_name)}</code>\n\n📢 {CHANNEL_LINK}", prog)
 
         if extract_task:
             for sub_f in await extract_task:
