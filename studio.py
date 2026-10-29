@@ -148,7 +148,7 @@ def inject_watermark(text, duration):
 # =========================================================
 PLAY_W, PLAY_H = 1920, 1080
 # Dialogue style (measuring/wrap aur asli ASS style dono yahi values use karte hain)
-DLG_FONT_SIZE = 82
+DLG_FONT_SIZE = 80
 DLG_OUTLINE = 5
 DLG_SHADOW = 2
 DLG_MARGIN_V = 60
@@ -739,13 +739,10 @@ async def main():
         has_reso = reso_clean.isdigit()
         effective_height = int(reso_clean) if has_reso else vid_height
         if is_hardsub:
-            # CRF size guarantee nahi deta (simple scenes me bahut chhota ho jaata hai),
-            # isliye target bitrate = source ka bitrate (audio hata ke). Size ~source ke barabar.
-            src_kbps = os.path.getsize(video_file) * 8 / duration / 1000
-            tgt_kbps = max(600, int((src_kbps - 96) * 1.25))   # 25% extra bitrate -> subtitle text saaf
-            target_rate = f"{tgt_kbps}k"
-            max_rate, buf_size = None, None   # hardsub me bitrate cap nahi (compress task me cap waise hi hai)
-            enc_preset, enc_crf = "ultrafast", "19"   # speed ke liye ultrafast; size target_rate se fix
+            # Hardsub: size ki koi limit nahi, sirf quality (CRF). Chhota number = better quality, badi file.
+            target_rate = None
+            max_rate, buf_size = None, None
+            enc_preset, enc_crf = "ultrafast", "18"
         else:
             target_rate = None
             max_rate, buf_size = pick_rate(effective_height)
