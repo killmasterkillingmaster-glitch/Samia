@@ -29,10 +29,10 @@ PREFERRED_FONT = "RoundSub-Bold.ttf"  # pehle ye file dhundhega, na mile to fold
 # ---------------------------------------------------------
 # HARDSUB ENCODE SETTINGS (yahan se size/speed control hota hai)
 # ---------------------------------------------------------
-HARDSUB_PRESET = "ultrafast"      # speed full
-HARDSUB_CRF = "27"                # bada number = chhoti file
-HARDSUB_MAXRATE = "2000k"         # video bitrate ki upper limit (24 min episode ~ 370-380MB)
-HARDSUB_BUFSIZE = "4000k"         # maxrate ka double
+HARDSUB_PRESET = "veryfast"       # ultrafast se machchar (mosquito noise) aata tha
+HARDSUB_CRF = "23"                # bada number = chhoti file
+HARDSUB_MAXRATE = "3000k"         # video bitrate ki upper limit (24 min episode ~ 450-540MB)
+HARDSUB_BUFSIZE = "6000k"         # maxrate ka double
 # size (MB) ~= bitrate(kbps) x seconds / 8000  -> lamba episode ho to MAXRATE kam karo
 
 _user_id_raw = os.getenv("USER_ID")
@@ -621,6 +621,9 @@ def build_ffmpeg_cmd(video_file, vf, out_name, max_rate=None, buf_size=None, pre
         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
         "-c:v", "libx264", "-preset", preset,
     ]
+    # anime ke liye: banding / noise kam (ultrafast me tune kaam nahi karta, isliye skip)
+    if preset != "ultrafast":
+        cmd += ["-tune", "animation"]
     # target_rate diya ho to bitrate fix (size source ke barabar), warna CRF (quality-based)
     cmd += ["-b:v", target_rate] if target_rate else ["-crf", crf]
     # bitrate cap sirf tab lagta hai jab max_rate/buf_size diye gaye ho
