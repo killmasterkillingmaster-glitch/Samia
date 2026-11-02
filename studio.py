@@ -26,6 +26,15 @@ RUN_ID = (os.getenv("GITHUB_RUN_ID") or "").strip()   # set automatically by Git
 FONT_DIR = "font"                 # repo me folder ka naam (studio.py ke bagal me)
 PREFERRED_FONT = "RoundSub-Bold.ttf"  # pehle ye file dhundhega, na mile to folder ki pehli font file
 
+# ---------------------------------------------------------
+# HARDSUB ENCODE SETTINGS (yahan se size/speed control hota hai)
+# ---------------------------------------------------------
+HARDSUB_PRESET = "ultrafast"      # speed full
+HARDSUB_CRF = "27"                # bada number = chhoti file
+HARDSUB_MAXRATE = "2000k"         # video bitrate ki upper limit (24 min episode ~ 370-380MB)
+HARDSUB_BUFSIZE = "4000k"         # maxrate ka double
+# size (MB) ~= bitrate(kbps) x seconds / 8000  -> lamba episode ho to MAXRATE kam karo
+
 _user_id_raw = os.getenv("USER_ID")
 USER_ID = int(_user_id_raw) if _user_id_raw and _user_id_raw.strip().lower() != "none" else CHAT_ID
 
@@ -614,7 +623,7 @@ def build_ffmpeg_cmd(video_file, vf, out_name, max_rate=None, buf_size=None, pre
     ]
     # target_rate diya ho to bitrate fix (size source ke barabar), warna CRF (quality-based)
     cmd += ["-b:v", target_rate] if target_rate else ["-crf", crf]
-    # bitrate cap sirf tab lagta hai jab max_rate/buf_size diye gaye ho (compress task)
+    # bitrate cap sirf tab lagta hai jab max_rate/buf_size diye gaye ho
     if max_rate and buf_size:
         cmd += ["-maxrate", max_rate, "-bufsize", buf_size]
     cmd += [
@@ -739,10 +748,11 @@ async def main():
         has_reso = reso_clean.isdigit()
         effective_height = int(reso_clean) if has_reso else vid_height
         if is_hardsub:
-            # Hardsub: size ki koi limit nahi, sirf quality (CRF). Chhota number = better quality, badi file.
+            # Hardsub: ultrafast (speed full) + bitrate cap taaki size 400MB ke andar rahe.
+            # Settings upar HARDSUB_* constants me hain.
             target_rate = None
-            max_rate, buf_size = None, None
-            enc_preset, enc_crf = "ultrafast", "18"
+            max_rate, buf_size = HARDSUB_MAXRATE, HARDSUB_BUFSIZE
+            enc_preset, enc_crf = HARDSUB_PRESET, HARDSUB_CRF
         else:
             target_rate = None
             max_rate, buf_size = pick_rate(effective_height)
