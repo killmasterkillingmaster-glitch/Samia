@@ -672,6 +672,54 @@ async def run_ffmpeg(cmd, duration, title):
 
 
 # =========================================================
+# SOFTSUB: re-encode NAHI hota. Video + audio copy, ass + font mkv me add hote hain.
+# Ass jaisi hai waisi rehti hai; sirf ASI_Watermark style + watermark lines (upar ki layer) add hoti hain.
+# =========================================================
+FONT_MIME = {".ttf": "application/x-truetype-font", ".ttc": "application/x-truetype-font",
+             ".otf": "application/vnd.ms-opentype"}
+
+
+def prepare_softsub_ass(sub_file, duration, out_path="soft_sub.ass"):
+    text = read_text_any(sub_file).replace("\r\n", "\n").replace("\r", "\n")
+    if not (sub_file.lower().endswith((".ass", ".ssa")) or is_ass_text(text)):
+        # srt / vtt -> ass (ffmpeg se convert)
+        ext = ".vtt" if text.lstrip().upper().startswith("WEBVTT") else ".srt"
+        src, dst = "soft_in" + ext, "soft_conv.ass"
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(text)
+        r = subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", src, dst],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0 or not os.path.exists(dst):
+            raise Exception("Subtitle ko ass me convert nahi kar paya:\n" + (r.stderr or "")[-300:])
+        text = read_text_any(dst).replace("\r\n", "\n").replace("\r", "\n")
+    if WATERMARK_STYLE_NAME not in text:
+        text = inject_watermark(text, duration)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(text)
+    return out_path
+
+
+async def run_softsub(video_file, sub_file, duration, out_name, title):
+    font_path = find_repo_font()
+    if not font_path:
+        raise Exception(f"Font nahi mila: repo ke '{FONT_DIR}' folder me font file daalo.")
+    ass_path = await asyncio.to_thread(prepare_softsub_ass, sub_file, duration)
+    mime = FONT_MIME.get(os.path.splitext(font_path)[1].lower(), "application/x-truetype-font")
+    print(f"Softsub font: {font_path} -> family '{get_font_name(font_path)}'", flush=True)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-nostats", "-loglevel", "error", "-progress", "pipe:1",
+        "-i", video_file, "-i", ass_path,
+        "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
+        "-c", "copy", "-c:s", "ass",
+        "-disposition:s:0", "default",
+        "-attach", font_path, "-metadata:s:t:0", f"mimetype={mime}",
+        "-max_muxing_queue_size", "1024",
+        out_name,
+    ]
+    await run_ffmpeg(cmd, duration, title)
+
+
+# =========================================================
 # MAIN
 # =========================================================
 async def main():
@@ -712,14 +760,15 @@ async def main():
 
     try:
         is_hardsub = TASK_TYPE == "hardsub"
-        step_dl = "hardsub_download" if is_hardsub else "compress_download"
+        is_softsub = TASK_TYPE == "softsub"
+        step_dl = "hardsub_download" if (is_hardsub or is_softsub) else "compress_download"
 
         # ---- downloads: video starts right away, subtitle (tiny) fetched alongside ----
         # Font Telegram se nahi aata: hardsub ke time repo ke FONT_DIR folder se liya jaata hai.
         video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
         sub_file = None
         try:
-            if is_hardsub:
+            if is_hardsub or is_softsub:
                 sub_file = await download_tg_link(app, SUB_ID, "sub_raw", "sub", show_progress=False)
                 if not sub_file:
                     raise Exception("Subtitle file not found or download failed.")
@@ -738,7 +787,19 @@ async def main():
         if is_set(RENAME):
             base_name = RENAME.rsplit(".", 1)[0] if "." in RENAME else RENAME
         base_name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", base_name).strip()[:120] or "output"
-        out_name = f"{base_name}.mp4"
+        out_name = f"{base_name}.mkv" if is_softsub else f"{base_name}.mp4"
+
+        # ---- SOFTSUB: video + audio copy (re-encode nahi), ass + font mkv me add ----
+        if is_softsub:
+            title = "Muxing Softsub"
+            await update_http_status(f"⚙️ <b>{title}</b>\n<code>{get_process_bar(0)}</code> [0.0%]")
+            await run_softsub(video_file, sub_file, duration, out_name, title)
+            await update_http_status(f"📤 <b>Sending Video</b>\n<code>{get_send_bar(0)}</code> [0.0%]")
+            await deliver_video_asset(app, CHAT_ID, USER_ID, out_name,
+                                      f"✅ <b>Softsub Completed!</b>\n<code>{html.escape(out_name)}</code>", prog)
+            try: await app.delete_messages(CHAT_ID, status_msg_id)
+            except Exception: pass
+            return
 
         font_path = find_repo_font() if is_hardsub else None
         custom_font = bool(font_path)
