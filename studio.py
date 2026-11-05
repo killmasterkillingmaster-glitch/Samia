@@ -523,6 +523,74 @@ async def download_tg_link(app_instance, link, output_path, step_name, min_size=
     return None
 
 
+# =========================================================
+# LINK DOWNLOAD (direct link / .torrent / magnet) -> aria2c
+# VIDEO_ID agar t.me ka link nahi hai to video yahan se download hoti hai.
+# Video ke andar jo subtitle pehle se hai wo yahan touch nahi hoti; hardsub me ffmpeg '-sn' lagata hai
+# aur sirf user ki di hui subtitle (ready_sub.ass) burn hoti hai.
+# =========================================================
+LINK_DL_DIR = "dl"
+VIDEO_EXTS = (".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v", ".ts")
+ARIA_PROG = re.compile(r"([\d.]+\s?[KMGT]?i?B)/([\d.]+\s?[KMGT]?i?B)\((\d+)%\)")
+ARIA_SPEED = re.compile(r"DL:([\d.]+\s?[KMGT]?i?B)")
+
+
+def is_external_link(v):
+    """True = t.me ka message link nahi hai (direct / torrent / magnet link hai)."""
+    return is_set(v) and not re.match(r"https?://t\.me/", str(v).strip(), re.I)
+
+
+async def _aria_run(link, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    cmd = ["aria2c", "--dir", out_dir, "--console-log-level=warn", "--summary-interval=5",
+           "--enable-color=false", "--file-allocation=none", "--allow-overwrite=true",
+           "--auto-file-renaming=false", "--follow-torrent=true",
+           "--seed-time=0",            # torrent complete hote hi band (warna seed karta rehta)
+           "--bt-stop-timeout=300",    # 5 min tak speed 0 rahi to ruk jao
+           "--max-connection-per-server=16", "--split=16", "--min-split-size=1M",
+           link]
+    p = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    buf, tail, last = "", "", 0.0
+    try:
+        while True:
+            chunk = await p.stdout.read(2048)
+            if not chunk:
+                break
+            txt = chunk.decode("utf-8", "ignore")
+            buf = (buf + txt)[-800:]
+            tail = (tail + txt)[-1500:]
+            now = time.time()
+            if now - last > 8:
+                found = list(ARIA_PROG.finditer(buf))
+                if found:
+                    done, total, pct = found[-1].groups()
+                    speeds = ARIA_SPEED.findall(buf)
+                    speed = speeds[-1] if speeds else "?"
+                    print(f"[link_download] {pct}%  {speed}/s", flush=True)
+                    asyncio.create_task(update_http_status(
+                        f"📥 <b>Downloading Link</b>\n<code>{get_download_bar(int(pct))}</code> [{pct}%]\n"
+                        f"🚀 Speed: <b>{speed}/s</b>\n📦 {done} / {total}"))
+                    last = now
+        await p.wait()
+    finally:
+        if p.returncode is None:
+            p.kill()
+    if p.returncode != 0:
+        raise Exception("Link se download fail ho gaya:\n" + tail.strip()[-400:])
+
+    vids = [os.path.join(r, f) for r, _, fs in os.walk(out_dir) for f in fs if f.lower().endswith(VIDEO_EXTS)]
+    if not vids:
+        raise Exception("Link me koi video file nahi mili.")
+    return max(vids, key=os.path.getsize)   # season pack ho to sabse badi video
+
+
+async def download_external_link(link, out_dir=LINK_DL_DIR):
+    try:
+        return await asyncio.wait_for(_aria_run(link.strip(), out_dir), timeout=TRANSFER_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise Exception("Link download 40 min me complete nahi hua.")
+
+
 def make_thumb(file_path, duration):
     thumb = "thumb.jpg"
     try:
@@ -762,10 +830,14 @@ async def main():
         is_hardsub = TASK_TYPE == "hardsub"
         is_softsub = TASK_TYPE == "softsub"
         step_dl = "hardsub_download" if (is_hardsub or is_softsub) else "compress_download"
+        from_link = is_external_link(VIDEO_ID)   # True = direct / torrent / magnet link (Telegram se nahi)
 
         # ---- downloads: video starts right away, subtitle (tiny) fetched alongside ----
         # Font Telegram se nahi aata: hardsub ke time repo ke FONT_DIR folder se liya jaata hai.
-        video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
+        if from_link:
+            video_task = asyncio.create_task(download_external_link(VIDEO_ID))
+        else:
+            video_task = asyncio.create_task(download_tg_link(app, VIDEO_ID, "video.mkv", step_dl, min_size=10000))
         sub_file = None
         try:
             if is_hardsub or is_softsub:
@@ -786,6 +858,9 @@ async def main():
         base_name = "output"
         if is_set(RENAME):
             base_name = RENAME.rsplit(".", 1)[0] if "." in RENAME else RENAME
+        elif from_link:
+            # "Same name" + link: naam download hui video ki file se
+            base_name = os.path.splitext(os.path.basename(video_file))[0]
         base_name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", base_name).strip()[:120] or "output"
         out_name = f"{base_name}.mkv" if is_softsub else f"{base_name}.mp4"
 
