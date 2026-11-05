@@ -7,7 +7,7 @@ on:
         description: 'Task Type'
         required: true
       video_id:
-        description: 'Telegram Video Link'
+        description: 'Telegram Video Link or Direct/Torrent/Magnet Link'
         required: true
       sub_id:
         description: 'Subtitle Link'
@@ -62,7 +62,7 @@ jobs:
       - name: Install High-Speed FFmpeg & Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-liberation fontconfig
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-liberation fontconfig aria2
           pip install --no-cache-dir -r requirements.txt tgcrypto
 
       - name: Run Studio Processor
